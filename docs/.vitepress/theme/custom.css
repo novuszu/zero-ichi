@@ -1,0 +1,1172 @@
+/*
+ * Zero Ichi docs theme
+ */
+
+/* ─── Design Tokens ────────────────────────────────────────────── */
+
+:root {
+    /* Font stack — monospace everywhere */
+    --vp-font-family-base: 'IBM Plex Mono', ui-monospace, SFMono-Regular,
+        Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    --vp-font-family-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular,
+        Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+
+    /* ── Core palette ── */
+    --zi-bg: #201d1d;
+    --zi-bg-alt: #302c2c;
+    --zi-bg-soft: #2a2626;
+    --zi-surface: #262222;
+    --zi-terminal: #181515;
+    --zi-light: #fdfcfc;
+    --zi-light-soft: #f1eeee;
+    --zi-muted: #9a9898;
+    --zi-muted-soft: #6e6e73;
+    --zi-text-secondary: #c6c1c1;
+
+    /* ── Borders ── */
+    --zi-border: rgba(15, 0, 0, 0.12);
+    --zi-border-strong: #646262;
+    --zi-border-hover: rgba(253, 252, 252, 0.12);
+
+    /* ── Accent / semantic ── */
+    --zi-blue: #007aff;
+    --zi-blue-hover: #0056b3;
+    --zi-blue-active: #004085;
+    --zi-red: #ff3b30;
+    --zi-red-hover: #d70015;
+    --zi-green: #30d158;
+    --zi-orange: #ff9f0a;
+    --zi-orange-hover: #cc7f08;
+
+    /* ── Spacing ── */
+    --zi-radius: 4px;
+    --zi-input-radius: 6px;
+    --zi-space-1: 4px;
+    --zi-space-2: 8px;
+    --zi-space-3: 12px;
+    --zi-space-4: 16px;
+    --zi-space-5: 20px;
+    --zi-space-6: 24px;
+    --zi-space-8: 32px;
+    --zi-space-10: 40px;
+    --zi-space-12: 48px;
+    --zi-space-16: 64px;
+    --zi-space-20: 80px;
+
+    /* ── Transition ── */
+    --zi-transition: 120ms ease;
+
+    /* ── VitePress token overrides ── */
+    --vp-c-bg: var(--zi-bg);
+    --vp-c-bg-alt: var(--zi-bg-alt);
+    --vp-c-bg-soft: var(--zi-bg-soft);
+    --vp-c-bg-elv: var(--zi-surface);
+    --vp-c-bg-elv-up: var(--zi-bg-alt);
+    --vp-sidebar-bg-color: var(--zi-bg);
+    --vp-nav-bg-color: var(--zi-bg);
+
+    --vp-c-text-1: var(--zi-light);
+    --vp-c-text-2: var(--zi-text-secondary);
+    --vp-c-text-3: var(--zi-muted);
+
+    --vp-c-border: var(--zi-border);
+    --vp-c-divider: var(--zi-border);
+    --vp-c-gutter: var(--zi-border);
+
+    --vp-c-brand-1: var(--zi-blue);
+    --vp-c-brand-2: var(--zi-blue-hover);
+    --vp-c-brand-3: var(--zi-blue-active);
+    --vp-c-brand-soft: rgba(0, 122, 255, 0.14);
+
+    --vp-c-tip-1: var(--zi-blue);
+    --vp-c-tip-2: var(--zi-blue);
+    --vp-c-tip-soft: rgba(0, 122, 255, 0.12);
+    --vp-c-warning-1: var(--zi-orange);
+    --vp-c-warning-2: var(--zi-orange-hover);
+    --vp-c-warning-soft: rgba(255, 159, 10, 0.12);
+    --vp-c-danger-1: var(--zi-red);
+    --vp-c-danger-2: var(--zi-red-hover);
+    --vp-c-danger-soft: rgba(255, 59, 48, 0.12);
+
+    /* ── Buttons ── */
+    --vp-button-brand-bg: var(--zi-bg);
+    --vp-button-brand-hover-bg: var(--zi-blue-hover);
+    --vp-button-brand-active-bg: var(--zi-blue-active);
+    --vp-button-brand-text: var(--zi-light);
+    --vp-button-brand-border: var(--zi-border-strong);
+    --vp-button-alt-bg: var(--zi-bg-alt);
+    --vp-button-alt-hover-bg: #3a3535;
+    --vp-button-alt-active-bg: #2b2727;
+    --vp-button-alt-text: var(--zi-light);
+    --vp-button-alt-border: var(--zi-border-strong);
+
+    /* ── Hero ── */
+    --vp-home-hero-name-color: var(--zi-light);
+    --vp-home-hero-text-color: var(--zi-light);
+    --vp-home-hero-tagline-color: var(--zi-muted);
+
+    /* ── Custom blocks ── */
+    --vp-custom-block-tip-border: var(--zi-blue);
+    --vp-custom-block-tip-bg: rgba(0, 122, 255, 0.06);
+    --vp-custom-block-info-border: var(--zi-border-strong);
+    --vp-custom-block-info-bg: rgba(253, 252, 252, 0.03);
+    --vp-custom-block-warning-border: var(--zi-orange);
+    --vp-custom-block-warning-bg: rgba(255, 159, 10, 0.06);
+    --vp-custom-block-danger-border: var(--zi-red);
+    --vp-custom-block-danger-bg: rgba(255, 59, 48, 0.06);
+}
+
+/* ─── Dark Mode ────────────────────────────────────────────────── */
+
+.dark {
+    color-scheme: dark;
+}
+
+/* ─── Global Foundation ────────────────────────────────────────── */
+
+html,
+body,
+.Layout,
+.VPApp {
+    background: var(--zi-bg);
+}
+
+body {
+    font-family: var(--vp-font-family-base);
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 1.5;
+    color: var(--zi-light);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Kill all shadows globally — terminal aesthetic = flat */
+* {
+    box-shadow: none !important;
+}
+
+/* Hide appearance switch (force dark) */
+.VPSwitchAppearance {
+    display: none !important;
+}
+
+/* ─── Selection ────────────────────────────────────────────────── */
+
+::selection {
+    background: rgba(0, 122, 255, 0.25);
+    color: var(--zi-light);
+}
+
+::-moz-selection {
+    background: rgba(0, 122, 255, 0.25);
+    color: var(--zi-light);
+}
+
+/* ─── Scrollbar ────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--zi-bg);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--zi-bg-alt);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--zi-border-strong);
+}
+
+/* Firefox */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--zi-bg-alt) var(--zi-bg);
+}
+
+/* ─── Navigation ───────────────────────────────────────────────── */
+
+.VPNav,
+.VPNavBar,
+.VPSidebar,
+.VPContent,
+.VPContent.has-sidebar,
+.VPDoc,
+.VPFooter {
+    background: var(--zi-bg);
+}
+
+.VPNav {
+    border-bottom: 1px solid var(--zi-border);
+}
+
+.VPNavBar {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+.VPNavBarTitle .title,
+.VPNavBarTitle .text {
+    font-family: var(--vp-font-family-base);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.VPNavBarMenuLink,
+.VPSidebarItem .text,
+.VPSidebarItem .link-text,
+.VPDoc,
+.vp-doc,
+button,
+input,
+textarea,
+select {
+    font-family: var(--vp-font-family-base);
+}
+
+/* Nav link styles — underlined, weight 500 */
+.VPNavBarMenuLink {
+    font-weight: 500;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: transparent;
+    transition: color var(--zi-transition), text-decoration-color var(--zi-transition);
+}
+
+.VPNavBarMenuLink:hover {
+    color: var(--zi-blue);
+    text-decoration-color: var(--zi-blue);
+}
+
+.VPNavBarMenuLink.active {
+    color: var(--zi-light);
+    text-decoration-color: var(--zi-light);
+}
+
+/* ─── Sidebar ──────────────────────────────────────────────────── */
+
+.VPSidebar {
+    border-right: 1px solid var(--zi-border);
+}
+
+.VPNavBarMenuLink,
+.VPSocialLink,
+.VPSidebarItem .text,
+.VPSidebarItem .link-text,
+.VPSidebarItem .caret,
+.vp-doc,
+.vp-doc p,
+.vp-doc li,
+.vp-doc td,
+.vp-doc th {
+    color: var(--zi-light);
+}
+
+/* Section headings */
+.VPSidebarItem.level-0 > .item .text,
+.group > .VPSidebarItem .text {
+    font-weight: 700;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--zi-muted);
+}
+
+.VPSidebarItem .items {
+    border-left: 1px solid var(--zi-border);
+}
+
+/* Active sidebar item — accent left bar */
+.VPSidebarItem.is-active > .item {
+    border-left: 2px solid var(--zi-blue);
+    margin-left: -1px;
+    padding-left: 12px;
+}
+
+.VPSidebarItem.is-active > .item .link-text {
+    color: var(--zi-light);
+    font-weight: 700;
+}
+
+/* Sidebar link transitions */
+.VPSidebarItem .link-text {
+    transition: color var(--zi-transition);
+}
+
+.VPSidebarItem .link-text:hover {
+    color: var(--zi-blue);
+}
+
+/* Doc links */
+.VPDoc a,
+.vp-doc a {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: rgba(0, 122, 255, 0.3);
+    transition: color var(--zi-transition), text-decoration-color var(--zi-transition);
+}
+
+.VPDoc a:hover,
+.vp-doc a:hover {
+    color: var(--zi-blue);
+    text-decoration-color: var(--zi-blue);
+}
+
+/* ─── Content Container ───────────────────────────────────────── */
+
+.VPDoc .content-container,
+.VPDoc.has-sidebar .content-container {
+    max-width: 860px;
+}
+
+/* ─── Typography ───────────────────────────────────────────────── */
+
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4,
+.vp-doc h5,
+.vp-doc h6 {
+    font-family: var(--vp-font-family-base);
+    color: var(--zi-light);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.vp-doc h1 {
+    font-size: 2.38rem;
+    line-height: 1.3;
+    padding-bottom: var(--zi-space-4);
+    border-bottom: 1px solid var(--zi-border);
+    margin-bottom: var(--zi-space-8);
+}
+
+.vp-doc h2 {
+    font-size: 1.25rem;
+    line-height: 1.5;
+    margin-top: var(--zi-space-12);
+    padding-bottom: var(--zi-space-2);
+    border-bottom: 1px solid var(--zi-border);
+    margin-bottom: var(--zi-space-6);
+}
+
+.vp-doc h3 {
+    font-size: 1rem;
+    line-height: 1.5;
+    margin-top: var(--zi-space-8);
+    color: var(--zi-text-secondary);
+}
+
+.vp-doc p,
+.vp-doc li,
+.vp-doc td,
+.vp-doc th,
+.vp-doc blockquote {
+    font-size: 1rem;
+    line-height: 1.5;
+}
+
+.vp-doc strong,
+.vp-doc b,
+.VPFeature .title,
+.VPSidebarItem.is-active > .item .link-text {
+    font-weight: 700;
+}
+
+/* Captions / small text */
+.vp-doc small,
+.vp-doc .caption {
+    font-size: 0.875rem;
+    line-height: 2;
+    color: var(--zi-muted);
+}
+
+/* ─── Inline Code ──────────────────────────────────────────────── */
+
+.vp-doc code,
+.vp-doc kbd,
+.vp-code,
+div[class*='language-'] code,
+div[class*='language-'] pre {
+    font-family: var(--vp-font-family-mono);
+}
+
+.vp-doc :not(pre) > code {
+    border: 1px solid var(--zi-border);
+    border-radius: var(--zi-radius);
+    background: var(--zi-bg-alt);
+    color: var(--zi-light);
+    padding: 2px 6px;
+    font-size: 0.9em;
+}
+
+/* ─── Code Blocks ──────────────────────────────────────────────── */
+
+div[class*='language-'] {
+    border: 1px solid var(--zi-border);
+    border-radius: var(--zi-radius);
+    background: var(--zi-terminal);
+    position: relative;
+}
+
+/* Subtle warm inner accent at top */
+div[class*='language-']::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(253, 252, 252, 0.06) 30%,
+        rgba(253, 252, 252, 0.06) 70%,
+        transparent
+    );
+    pointer-events: none;
+    z-index: 1;
+}
+
+div[class*='language-'] pre,
+div[class*='language-'] code,
+.vp-code-group .tabs,
+.vp-code-group .blocks {
+    background: transparent;
+}
+
+/* Code block language label */
+div[class*='language-'] span.lang {
+    color: var(--zi-muted-soft);
+    font-size: 0.75rem;
+    font-weight: 500;
+    user-select: none;
+}
+
+/* Code group tabs */
+.vp-code-group .tabs {
+    border-bottom: 1px solid var(--zi-border);
+}
+
+.vp-code-group .tabs label {
+    font-family: var(--vp-font-family-base);
+    font-weight: 500;
+    color: var(--zi-muted);
+    transition: color var(--zi-transition);
+}
+
+.vp-code-group .tabs label.active {
+    color: var(--zi-light);
+    border-bottom: 2px solid var(--zi-muted);
+}
+
+/* ─── Tables ───────────────────────────────────────────────────── */
+
+.vp-doc table {
+    display: table;
+    width: 100%;
+    border-collapse: collapse;
+    margin: var(--zi-space-6) 0;
+    border: 1px solid var(--zi-border);
+    border-radius: var(--zi-radius);
+    overflow: hidden;
+    font-size: 0.9375rem;
+}
+
+.vp-doc tr {
+    border-top: 1px solid var(--zi-border);
+    transition: background-color var(--zi-transition);
+}
+
+/* Alternating rows */
+.vp-doc tr:nth-child(even) {
+    background: rgba(253, 252, 252, 0.015);
+}
+
+.vp-doc tr:hover {
+    background: rgba(253, 252, 252, 0.03);
+}
+
+.vp-doc th,
+.vp-doc td {
+    border: 1px solid var(--zi-border);
+    padding: 10px 14px;
+}
+
+.vp-doc th {
+    background: var(--zi-bg-alt);
+    font-weight: 700;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--zi-muted);
+}
+
+.vp-doc td code {
+    font-size: 0.85em;
+}
+
+/* ─── Custom Blocks (tip/warning/danger/info/details) ──────────── */
+
+.vp-doc blockquote {
+    border: none;
+    border-left: 3px solid var(--zi-border-strong);
+    border-radius: 0;
+    padding: 12px 18px;
+    background: rgba(253, 252, 252, 0.02);
+    color: var(--zi-muted);
+    font-style: italic;
+}
+
+.custom-block {
+    border: 1px solid var(--zi-border);
+    border-left: 3px solid;
+    border-radius: var(--zi-radius);
+    padding: 16px 20px;
+    background: rgba(253, 252, 252, 0.02);
+    margin: var(--zi-space-6) 0;
+}
+
+.custom-block.tip {
+    border-left-color: var(--zi-blue);
+    background: rgba(0, 122, 255, 0.04);
+}
+
+.custom-block.warning {
+    border-left-color: var(--zi-orange);
+    background: rgba(255, 159, 10, 0.04);
+}
+
+.custom-block.danger {
+    border-left-color: var(--zi-red);
+    background: rgba(255, 59, 48, 0.04);
+}
+
+.custom-block.info {
+    border-left-color: var(--zi-border-strong);
+    background: rgba(253, 252, 252, 0.02);
+}
+
+.custom-block.details {
+    border-left-color: var(--zi-muted);
+    background: rgba(253, 252, 252, 0.02);
+}
+
+.custom-block .custom-block-title {
+    font-weight: 700;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: var(--zi-space-2);
+}
+
+.custom-block.tip .custom-block-title {
+    color: var(--zi-blue);
+}
+
+.custom-block.warning .custom-block-title {
+    color: var(--zi-orange);
+}
+
+.custom-block.danger .custom-block-title {
+    color: var(--zi-red);
+}
+
+.custom-block.info .custom-block-title {
+    color: var(--zi-muted);
+}
+
+/* ─── Buttons ──────────────────────────────────────────────────── */
+
+.VPButton,
+.VPHero .action .VPButton {
+    border-radius: var(--zi-radius) !important;
+    border: 1px solid var(--zi-border-strong) !important;
+    font-family: var(--vp-font-family-base);
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 2;
+    min-height: 0;
+    transition: background-color var(--zi-transition), border-color var(--zi-transition),
+        color var(--zi-transition);
+}
+
+.VPHero .action .VPButton.brand,
+.VPButton.brand {
+    background: var(--zi-bg);
+    color: var(--zi-light);
+}
+
+.VPHero .action .VPButton.brand:hover,
+.VPButton.brand:hover {
+    background: var(--zi-blue-hover);
+    border-color: var(--zi-blue-hover) !important;
+}
+
+.VPHero .action .VPButton.alt,
+.VPButton.alt {
+    background: var(--zi-bg-alt);
+    color: var(--zi-light);
+}
+
+.VPHero .action .VPButton.alt:hover,
+.VPButton.alt:hover {
+    background: #3a3535;
+    border-color: var(--zi-border-strong) !important;
+}
+
+/* ─── Inputs ───────────────────────────────────────────────────── */
+
+input[type='text'],
+input[type='search'],
+input[type='email'],
+textarea,
+select {
+    border-radius: var(--zi-input-radius);
+    border: 1px solid var(--zi-border);
+    background: var(--zi-terminal);
+    color: var(--zi-light);
+    padding: var(--zi-space-5);
+    font-family: var(--vp-font-family-base);
+    transition: border-color var(--zi-transition);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+    border-color: var(--zi-blue);
+    outline: none;
+}
+
+/* ─── Search Modal ─────────────────────────────────────────────── */
+
+.VPLocalSearchBox .shell {
+    background: var(--zi-bg) !important;
+    border: 1px solid var(--zi-border-strong) !important;
+    border-radius: var(--zi-input-radius) !important;
+}
+
+.VPLocalSearchBox .search-input {
+    font-family: var(--vp-font-family-base) !important;
+    color: var(--zi-light) !important;
+}
+
+.VPLocalSearchBox .result {
+    border: 1px solid var(--zi-border) !important;
+    border-radius: var(--zi-radius) !important;
+    background: var(--zi-bg-alt) !important;
+}
+
+.VPLocalSearchBox .result.selected {
+    border-color: var(--zi-blue) !important;
+    background: var(--zi-surface) !important;
+}
+
+.VPLocalSearchBox .result .title {
+    color: var(--zi-light) !important;
+}
+
+.VPLocalSearchBox .result .excerpt {
+    color: var(--zi-muted) !important;
+}
+
+/* DocSearch (if used) */
+.DocSearch-Button,
+.DocSearch-Input,
+.DocSearch-Modal,
+.DocSearch-Hit,
+.DocSearch-Footer {
+    font-family: var(--vp-font-family-base);
+}
+
+.DocSearch-Button {
+    border: 1px solid var(--zi-border) !important;
+    border-radius: var(--zi-radius) !important;
+    background: var(--zi-bg-alt) !important;
+}
+
+/* ─── Hero Section ─────────────────────────────────────────────── */
+
+.VPHero {
+    padding-top: var(--zi-space-16);
+}
+
+.VPHero .name,
+.VPHero .text {
+    font-family: var(--vp-font-family-base) !important;
+    -webkit-text-fill-color: var(--zi-light) !important;
+    color: var(--zi-light) !important;
+    background: none !important;
+    text-shadow: none !important;
+}
+
+.VPHero .name {
+    font-size: 2.38rem !important;
+    font-weight: 700 !important;
+    line-height: 1.3 !important;
+    letter-spacing: -0.02em;
+}
+
+.VPHero .text {
+    color: var(--zi-muted) !important;
+    font-size: 1rem !important;
+    font-weight: 700 !important;
+    line-height: 1.5 !important;
+}
+
+.VPHero .tagline {
+    color: var(--zi-muted);
+    font-size: 1rem;
+    font-weight: 400;
+    line-height: 1.5;
+    max-width: 540px;
+}
+
+.VPHero .image {
+    border-radius: var(--zi-radius);
+}
+
+.VPHero .image img {
+    border-radius: var(--zi-radius);
+}
+
+/* ─── Features Grid ────────────────────────────────────────────── */
+
+.VPFeatures,
+.VPFeatures .container,
+.VPFeature {
+    background: transparent;
+}
+
+.VPFeature {
+    border: 1px solid var(--zi-border) !important;
+    border-radius: var(--zi-radius) !important;
+    background: var(--zi-bg-alt) !important;
+    transition: border-color var(--zi-transition), background-color var(--zi-transition),
+        transform var(--zi-transition);
+}
+
+.VPFeature:hover {
+    border-color: var(--zi-border-strong) !important;
+    background: var(--zi-surface) !important;
+    transform: translateY(-1px);
+}
+
+.VPFeature .title {
+    font-size: 1rem !important;
+    line-height: 1.5 !important;
+    color: var(--zi-light);
+}
+
+.VPFeature .details {
+    color: var(--zi-muted);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+}
+
+.VPFeature .link-text {
+    color: var(--zi-muted);
+    font-weight: 500;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: transparent;
+    transition: color var(--zi-transition), text-decoration-color var(--zi-transition);
+}
+
+.VPFeature:hover .link-text {
+    color: var(--zi-blue);
+    text-decoration-color: var(--zi-blue);
+}
+
+/* Feature icons */
+.VPFeature .icon {
+    margin-bottom: var(--zi-space-3);
+}
+
+/* ─── Homepage Custom Sections ─────────────────────────────────── */
+
+.home-section {
+    margin: var(--zi-space-8) 0 var(--zi-space-16);
+}
+
+.VPHero {
+    padding-bottom: 0 !important;
+    margin-bottom: var(--zi-space-8);
+}
+
+/* ─── Stats Section ────────────────────────────────────────────── */
+
+.stats-section {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--zi-space-4);
+}
+
+.stat-item {
+    border: 1px solid var(--zi-border);
+    border-radius: var(--zi-radius);
+    padding: var(--zi-space-5);
+    background: var(--zi-bg-alt);
+    text-align: center;
+    transition: border-color var(--zi-transition), background-color var(--zi-transition);
+}
+
+.stat-item:hover {
+    border-color: var(--zi-border-strong);
+    background: var(--zi-surface);
+}
+
+.stat-number {
+    color: var(--zi-light);
+    font-size: 2.25rem;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+}
+
+.stat-label {
+    color: var(--zi-muted);
+    font-size: 0.875rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: var(--zi-space-1);
+}
+
+.subtitle {
+    color: var(--zi-muted-soft);
+    font-size: 0.875rem;
+    font-weight: 400;
+    font-style: italic;
+    margin-bottom: var(--zi-space-3);
+}
+
+/* ─── Category Chips ───────────────────────────────────────────── */
+
+.categories-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--zi-space-3);
+    margin-top: var(--zi-space-4);
+}
+
+.category-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 8px 16px;
+    border: 1px solid var(--zi-border);
+    border-radius: var(--zi-radius);
+    background: var(--zi-bg-alt);
+    color: var(--zi-light);
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 0.9375rem;
+    transition: border-color var(--zi-transition), background-color var(--zi-transition),
+        color var(--zi-transition);
+}
+
+.category-chip:hover {
+    color: var(--zi-blue);
+    border-color: var(--zi-border-strong);
+    background: var(--zi-surface);
+}
+
+.step-link {
+    color: var(--zi-muted);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: rgba(154, 152, 152, 0.3);
+    font-weight: 500;
+    display: inline-block;
+    margin-top: var(--zi-space-4);
+    transition: color var(--zi-transition), text-decoration-color var(--zi-transition);
+}
+
+.step-link:hover {
+    color: var(--zi-blue);
+    text-decoration-color: var(--zi-blue);
+}
+
+/* ─── Badges / Pills ───────────────────────────────────────────── */
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: var(--zi-radius);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    line-height: 1.6;
+    vertical-align: middle;
+    margin-left: 6px;
+}
+
+.badge-admin {
+    background: rgba(0, 122, 255, 0.12);
+    color: var(--zi-blue);
+    border: 1px solid rgba(0, 122, 255, 0.2);
+}
+
+.badge-owner {
+    background: rgba(255, 159, 10, 0.12);
+    color: var(--zi-orange);
+    border: 1px solid rgba(255, 159, 10, 0.2);
+}
+
+.badge-group {
+    background: rgba(48, 209, 88, 0.12);
+    color: var(--zi-green);
+    border: 1px solid rgba(48, 209, 88, 0.2);
+}
+
+.badge-new {
+    background: rgba(255, 59, 48, 0.12);
+    color: var(--zi-red);
+    border: 1px solid rgba(255, 59, 48, 0.2);
+}
+
+/* ─── Outline / TOC ────────────────────────────────────────────── */
+
+.VPDocAside .outline-marker {
+    background-color: var(--zi-blue) !important;
+}
+
+.VPDocAsideOutline .outline-link {
+    font-size: 0.8125rem;
+    color: var(--zi-muted);
+    transition: color var(--zi-transition);
+}
+
+.VPDocAsideOutline .outline-link:hover,
+.VPDocAsideOutline .outline-link.active {
+    color: var(--zi-light);
+}
+
+/* ─── Footer ───────────────────────────────────────────────────── */
+
+.VPFooter {
+    border-top: 1px solid var(--zi-border);
+    padding: var(--zi-space-8) var(--zi-space-6);
+}
+
+.VPFooter .message,
+.VPFooter .copyright {
+    color: var(--zi-muted-soft);
+    font-size: 0.875rem;
+}
+
+/* ─── Edit Link / Last Updated ─────────────────────────────────── */
+
+.VPDocFooter .edit-link-button {
+    color: var(--zi-muted);
+    font-weight: 500;
+    transition: color var(--zi-transition);
+}
+
+.VPDocFooter .edit-link-button:hover {
+    color: var(--zi-blue);
+}
+
+.VPDocFooter .pager-link {
+    border: 1px solid var(--zi-border);
+    border-radius: var(--zi-radius);
+    transition: border-color var(--zi-transition);
+}
+
+.VPDocFooter .pager-link:hover {
+    border-color: var(--zi-border-strong);
+}
+
+.VPDocFooter .pager-link .title {
+    color: var(--zi-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.VPDocFooter .pager-link .desc {
+    color: var(--zi-light);
+    font-weight: 500;
+}
+
+/* ─── HR / Dividers ────────────────────────────────────────────── */
+
+.vp-doc hr {
+    border: none;
+    border-top: 1px solid var(--zi-border);
+    margin: var(--zi-space-10) 0;
+}
+
+/* ─── Lists ────────────────────────────────────────────────────── */
+
+.vp-doc ul,
+.vp-doc ol {
+    padding-left: 1.25em;
+}
+
+.vp-doc li + li {
+    margin-top: var(--zi-space-2);
+}
+
+.vp-doc li::marker {
+    color: var(--zi-muted);
+}
+
+/* ─── Responsive ───────────────────────────────────────────────── */
+
+@media (max-width: 960px) {
+    html,
+    body,
+    .Layout,
+    .VPDoc {
+        overflow-x: hidden;
+    }
+
+    .vp-doc table {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        table-layout: auto;
+    }
+
+    .vp-doc table thead,
+    .vp-doc table tbody {
+        display: table;
+        width: max-content;
+        min-width: 100%;
+    }
+
+    .vp-doc th,
+    .vp-doc td {
+        white-space: nowrap;
+    }
+
+    .stats-section {
+        grid-template-columns: 1fr;
+    }
+
+    .VPHero .name {
+        font-size: 1.75rem !important;
+    }
+
+    .home-section {
+        margin: var(--zi-space-12) 0;
+    }
+
+    .vp-doc h1 {
+        font-size: 1.75rem;
+    }
+
+    .vp-doc h2 {
+        font-size: 1.125rem;
+    }
+}
+
+@media (max-width: 640px) {
+    .vp-doc h1 {
+        font-size: 1.5rem;
+    }
+
+    .vp-doc div[class*='language-'] {
+        margin: var(--zi-space-2) 0;
+        border-radius: var(--zi-radius);
+    }
+
+    .VPHero {
+        padding-top: var(--zi-space-10);
+    }
+
+    .VPHero .name {
+        font-size: 1.5rem !important;
+    }
+
+    .categories-grid {
+        gap: var(--zi-space-2);
+    }
+
+    .category-chip {
+        padding: 6px 12px;
+        font-size: 0.875rem;
+    }
+
+    .stat-number {
+        font-size: 1.75rem;
+    }
+
+    .home-section {
+        margin: var(--zi-space-10) 0;
+    }
+}
+
+/* ─── Architecture Flow (Home) ─────────────────────────────────── */
+
+.arch-flow {
+    margin: var(--zi-space-4) 0;
+}
+
+.arch-flow p strong {
+    display: block;
+    color: var(--zi-light);
+    font-size: 0.875rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: var(--zi-space-3);
+}
+
+.arch-flow div[class*='language-'] {
+    background: transparent;
+    border: none;
+    margin: var(--zi-space-2) 0;
+}
+
+.arch-flow div[class*='language-']::before {
+    display: none;
+}
+
+.arch-flow pre {
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    overflow-x: auto;
+}
+
+.arch-flow code {
+    color: var(--zi-muted);
+}
+
+/* ─── Print ────────────────────────────────────────────────────── */
+
+@media print {
+    .VPNav,
+    .VPSidebar,
+    .VPDocAside,
+    .VPFooter,
+    .VPDocFooter .edit-link-button {
+        display: none !important;
+    }
+
+    body {
+        background: white;
+        color: black;
+    }
+
+    .vp-doc a {
+        color: black;
+        text-decoration: underline;
+    }
+
+    .vp-doc code {
+        background: #f5f5f5;
+        border-color: #ddd;
+    }
+}

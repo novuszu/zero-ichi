@@ -1,0 +1,678 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://github.com/MhankBarBar/zero-ichi/config.schema.json",
+    "title": "Zero Ichi Bot Configuration",
+    "description": "Configuration schema for Zero Ichi WhatsApp bot",
+    "type": "object",
+    "properties": {
+        "$schema": {
+            "type": "string",
+            "description": "Reference to the JSON schema"
+        },
+        "bot": {
+            "type": "object",
+            "description": "Bot core settings",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Session identifier used for the database filename (e.g., 'zero_ichi_bot' creates 'zero_ichi_bot.session')",
+                    "default": "zero_ichi_bot"
+                },
+                "prefix": {
+                    "type": "string",
+                    "description": "Command prefix. Supports regex patterns, e.g., '(!|/|.)' for multiple prefixes",
+                    "default": "/"
+                },
+                "login_method": {
+                    "type": "string",
+                    "enum": [
+                        "QR",
+                        "PAIR_CODE"
+                    ],
+                    "description": "Login method: 'QR' for QR code scanning, 'PAIR_CODE' for pairing code",
+                    "default": "QR"
+                },
+                "phone_number": {
+                    "type": "string",
+                    "description": "Phone number in international format without '+' (e.g., '628xxxx'). Used for PAIR_CODE login method",
+                    "pattern": "^$|^[0-9]+$"
+                },
+                "owner_jid": {
+                    "type": "string",
+                    "description": "JID (Jabber ID) of the bot owner for admin commands (e.g., '628xxxx@s.whatsapp.net' or '4089xxxx@lid')"
+                },
+                "auto_read": {
+                    "type": "boolean",
+                    "description": "Automatically mark messages as read",
+                    "default": false
+                },
+                "auto_react": {
+                    "type": "boolean",
+                    "description": "Automatically react to incoming messages",
+                    "default": false
+                },
+                "auto_react_emoji": {
+                    "type": "string",
+                    "description": "Emoji to use for auto-react feature",
+                    "default": ""
+                },
+                "auto_reload": {
+                    "type": "boolean",
+                    "description": "For development: automatically reload bot when files change",
+                    "default": true
+                },
+                "ignore_self_messages": {
+                    "type": "boolean",
+                    "description": "Ignore messages sent by the bot itself",
+                    "default": true
+                },
+                "self_mode": {
+                    "type": "boolean",
+                    "description": "Only process messages sent by the bot account itself",
+                    "default": false
+                }
+            },
+            "required": [
+                "name",
+                "prefix",
+                "login_method",
+                "owner_jid"
+            ]
+        },
+        "logging": {
+            "type": "object",
+            "description": "Logging configuration",
+            "properties": {
+                "log_messages": {
+                    "type": "boolean",
+                    "description": "Log incoming/outgoing messages to console",
+                    "default": true
+                },
+                "level": {
+                    "type": "string",
+                    "enum": [
+                        "DEBUG",
+                        "INFO",
+                        "WARNING",
+                        "ERROR",
+                        "CRITICAL"
+                    ],
+                    "description": "Logging level",
+                    "default": "INFO"
+                },
+                "file_logging": {
+                    "type": "boolean",
+                    "description": "Enable logging to file",
+                    "default": true
+                },
+                "verbose": {
+                    "type": "boolean",
+                    "description": "Enable verbose/detailed logging output",
+                    "default": false
+                }
+            }
+        },
+        "agentic_ai": {
+            "type": "object",
+            "description": "Agentic AI integration settings",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Enable AI-powered responses",
+                    "default": false
+                },
+                "provider": {
+                    "type": "string",
+                    "enum": [
+                        "openai",
+                        "anthropic",
+                        "google"
+                    ],
+                    "description": "AI provider to use",
+                    "default": "openai"
+                },
+                "api_key": {
+                    "type": "string",
+                    "description": "API key for the AI provider. Leave empty to use AI_API_KEY environment variable",
+                    "default": ""
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model name/identifier for the selected provider",
+                    "default": "gpt-5-mini"
+                },
+                "trigger_mode": {
+                    "type": "string",
+                    "enum": [
+                        "always",
+                        "mention",
+                        "reply"
+                    ],
+                    "description": "When AI should respond: 'always' (all messages), 'mention' (when bot is mentioned), 'reply' (when replying to bot)",
+                    "default": "mention"
+                },
+                "allowed_actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "List of allowed command actions for AI. Empty array means all non-dangerous actions are allowed",
+                    "default": []
+                },
+                "blocked_actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "List of command actions blocked from AI usage (for security)",
+                    "default": [
+                        "eval",
+                        "aeval",
+                        "addcommand",
+                        "delcommand"
+                    ]
+                },
+                "owner_only": {
+                    "type": "boolean",
+                    "description": "Restrict AI commands to bot owner only",
+                    "default": true
+                },
+                "daily_token_limit_user": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Daily token limit per user (0 = unlimited)",
+                    "default": 50000
+                },
+                "daily_token_limit_chat": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Daily token limit per chat (0 = unlimited)",
+                    "default": 200000
+                }
+            }
+        },
+        "features": {
+            "type": "object",
+            "description": "Feature toggles for bot functionality",
+            "properties": {
+                "anti_delete": {
+                    "type": "boolean",
+                    "description": "Forward deleted messages to owner",
+                    "default": true
+                },
+                "anti_link": {
+                    "type": "boolean",
+                    "description": "Detect and act on links in group chats",
+                    "default": true
+                },
+                "welcome": {
+                    "type": "boolean",
+                    "description": "Send welcome messages for new group members",
+                    "default": true
+                },
+                "notes": {
+                    "type": "boolean",
+                    "description": "Enable notes/saved replies feature",
+                    "default": true
+                },
+                "filters": {
+                    "type": "boolean",
+                    "description": "Enable message filters feature",
+                    "default": true
+                },
+                "blacklist": {
+                    "type": "boolean",
+                    "description": "Enable user/group blacklist feature",
+                    "default": true
+                },
+                "warnings": {
+                    "type": "boolean",
+                    "description": "Enable user warning system",
+                    "default": true
+                },
+                "automation_rules": {
+                    "type": "boolean",
+                    "description": "Enable no-code automation rules",
+                    "default": true
+                },
+                "anti_spam": {
+                    "type": "boolean",
+                    "description": "Enable anti-spam message flood protection",
+                    "default": false
+                }
+            }
+        },
+        "anti_delete": {
+            "type": "object",
+            "description": "Anti-delete feature settings",
+            "properties": {
+                "forward_to": {
+                    "type": "string",
+                    "description": "JID to forward deleted messages to (usually owner's JID)"
+                },
+                "cache_ttl": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Time-to-live for message cache in seconds",
+                    "default": 60
+                }
+            }
+        },
+        "anti_link": {
+            "type": "object",
+            "description": "Anti-link feature settings",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "warn",
+                        "delete",
+                        "kick"
+                    ],
+                    "description": "Action to take when a link is detected",
+                    "default": "warn"
+                },
+                "whitelist": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "List of JIDs that are allowed to send links",
+                    "default": []
+                }
+            }
+        },
+        "warnings": {
+            "type": "object",
+            "description": "Warning system settings",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Number of warnings before action is taken",
+                    "default": 3
+                },
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "kick"
+                    ],
+                    "description": "Action to take when warning limit is reached",
+                    "default": "kick"
+                }
+            }
+        },
+        "rate_limit": {
+            "type": "object",
+            "description": "Command rate limiter settings",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "user_cooldown": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 3.0
+                },
+                "command_cooldown": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 2.0
+                },
+                "burst_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 5
+                },
+                "burst_window": {
+                    "type": "number",
+                    "minimum": 1,
+                    "default": 10.0
+                }
+            }
+        },
+        "downloader": {
+            "type": "object",
+            "description": "Downloader settings for /dl, /audio, and /video commands",
+            "properties": {
+                "max_file_size_mb": {
+                    "type": "number",
+                    "minimum": 1,
+                    "description": "Maximum file size in MB for media downloads. WhatsApp allows up to 2GB for documents, 180MB for other media",
+                    "default": 50
+                },
+                "gallery_dl": {
+                    "type": "object",
+                    "description": "gallery-dl extractor runtime options (used by /photo and autodl photo mode)",
+                    "properties": {
+                        "config_file": {
+                            "type": "string",
+                            "description": "Optional path to gallery-dl config file",
+                            "default": ""
+                        },
+                        "config": {
+                            "type": "object",
+                            "description": "Optional inline gallery-dl configuration object",
+                            "default": {}
+                        },
+                        "cookies_file": {
+                            "type": "string",
+                            "description": "Optional cookies file path passed as --cookies",
+                            "default": ""
+                        },
+                        "cookies_from_browser": {
+                            "type": "string",
+                            "description": "Optional browser source passed as --cookies-from-browser (e.g. firefox, chrome)",
+                            "default": ""
+                        },
+                        "extra_args": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Extra gallery-dl CLI arguments",
+                            "default": []
+                        }
+                    }
+                },
+                "auto_link_download": {
+                    "type": "object",
+                    "description": "Automatic link download settings",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": false
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": [
+                                "auto",
+                                "audio",
+                                "video",
+                                "photo"
+                            ],
+                            "default": "auto"
+                        },
+                        "cooldown_seconds": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 30
+                        },
+                        "max_links_per_message": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1
+                        },
+                        "group_only": {
+                            "type": "boolean",
+                            "default": true
+                        },
+                        "photo": {
+                            "type": "object",
+                            "description": "Photo downloader behavior (gallery-dl)",
+                            "properties": {
+                                "max_images_per_link": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 100,
+                                    "default": 20
+                                },
+                                "max_images_per_album": {
+                                    "type": "integer",
+                                    "minimum": 2,
+                                    "maximum": 30,
+                                    "default": 10
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "call_guard": {
+            "type": "object",
+            "description": "Incoming call handling settings",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Enable incoming call guard behavior",
+                    "default": false
+                },
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "off",
+                        "block"
+                    ],
+                    "description": "Call action. `block` optionally sends a warning then blocks after delay",
+                    "default": "block"
+                },
+                "delay_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 60,
+                    "description": "Delay before blocking when action is `block`",
+                    "default": 3
+                },
+                "notify_caller": {
+                    "type": "boolean",
+                    "description": "Send private message to caller before action",
+                    "default": true
+                },
+                "notify_owner": {
+                    "type": "boolean",
+                    "description": "Notify owner when call guard takes action",
+                    "default": true
+                },
+                "whitelist": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "List of user JIDs exempt from call guard",
+                    "default": []
+                }
+            }
+        },
+        "disabled_commands": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "description": "List of command names that are disabled",
+            "default": []
+        },
+        "command_permissions": {
+            "type": "object",
+            "description": "Role overrides for command access (global and per-group)",
+            "properties": {
+                "global": {
+                    "type": "object",
+                    "description": "Global role override per command name",
+                    "additionalProperties": {
+                        "type": "string",
+                        "enum": [
+                            "member",
+                            "admin",
+                            "owner"
+                        ]
+                    },
+                    "default": {}
+                },
+                "groups": {
+                    "type": "object",
+                    "description": "Per-group role override maps by group JID",
+                    "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "string",
+                            "enum": [
+                                "member",
+                                "admin",
+                                "owner"
+                            ]
+                        }
+                    },
+                    "default": {}
+                }
+            },
+            "default": {
+                "global": {},
+                "groups": {}
+            }
+        },
+        "privacy": {
+            "type": "object",
+            "description": "Privacy and data retention settings",
+            "properties": {
+                "analytics_retention_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 365,
+                    "description": "How many days of analytics history to keep",
+                    "default": 30
+                },
+                "ai_memory_enabled": {
+                    "type": "boolean",
+                    "description": "Enable AI conversation memory globally",
+                    "default": true
+                },
+                "ai_memory_ttl_hours": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 720,
+                    "description": "AI memory time-to-live in hours before eviction",
+                    "default": 24
+                }
+            },
+            "default": {
+                "analytics_retention_days": 30,
+                "ai_memory_enabled": true,
+                "ai_memory_ttl_hours": 24
+            }
+        },
+        "anti_spam": {
+            "type": "object",
+            "description": "Anti-spam flood protection settings",
+            "properties": {
+                "max_messages": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 50,
+                    "description": "Maximum messages allowed per user within the time window before action is taken",
+                    "default": 5
+                },
+                "window_seconds": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 120,
+                    "description": "Sliding time window in seconds for counting messages",
+                    "default": 10
+                },
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "warn",
+                        "mute",
+                        "kick"
+                    ],
+                    "description": "Action to take when spam is detected",
+                    "default": "warn"
+                },
+                "whitelist_admins": {
+                    "type": "boolean",
+                    "description": "Exempt group admins from spam detection",
+                    "default": true
+                }
+            }
+        },
+        "dashboard": {
+            "type": "object",
+            "description": "Dashboard API and UI settings",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Enable the Dashboard API server",
+                    "default": false
+                },
+                "cors_origins": {
+                    "type": "array",
+                    "description": "Allowed CORS origins for dashboard API",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        "http://localhost:3000",
+                        "http://127.0.0.1:3000"
+                    ]
+                }
+            }
+        },
+        "telegram_forwarder": {
+            "type": "object",
+            "description": "Auto-forward messages from Telegram channels to WhatsApp chats or channels (newsletters)",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Enable the Telegram to WhatsApp forwarder",
+                    "default": false
+                },
+                "api_id": {
+                    "type": "integer",
+                    "description": "Telegram API ID (from my.telegram.org)",
+                    "default": 0
+                },
+                "api_hash": {
+                    "type": "string",
+                    "description": "Telegram API Hash (from my.telegram.org)",
+                    "default": ""
+                },
+                "phone": {
+                    "type": "string",
+                    "description": "Phone number for Telegram user account login (e.g. +628xxx)",
+                    "default": ""
+                },
+                "session_name": {
+                    "type": "string",
+                    "description": "Pyrogram session file name (no extension)",
+                    "default": "tg_forwarder"
+                },
+                "rules": {
+                    "type": "array",
+                    "description": "List of forwarding rules mapping Telegram sources to WhatsApp targets",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_chat_id": {
+                                "type": "integer",
+                                "description": "Telegram channel/group chat ID (negative for channels, e.g. -100123456789)"
+                            },
+                            "target_jids": {
+                                "type": "array",
+                                "description": "WhatsApp JIDs to forward to (supports @s.whatsapp.net, @g.us, @newsletter)",
+                                "items": {"type": "string"},
+                                "minItems": 1
+                            },
+                            "caption_prefix": {
+                                "type": "string",
+                                "description": "Optional prefix prepended to every caption/message (e.g. '[ChannelName] ')",
+                                "default": ""
+                            },
+                            "enabled": {
+                                "type": "boolean",
+                                "description": "Enable or disable this specific rule",
+                                "default": true
+                            }
+                        },
+                        "required": ["source_chat_id", "target_jids"]
+                    },
+                    "default": []
+                }
+            }
+        }
+    },
+    "required": [
+        "bot"
+    ]
+}

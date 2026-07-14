@@ -1,0 +1,2291 @@
+"""
+Dashboard API Server.
+
+A FastAPI backend that exposes bot configuration and stats to the dashboard.
+Run alongside the bot or separately.
+"""
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote
+
+from dotenv import load_dotenv
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.security.utils import get_authorization_scheme_param
+from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from core.analytics import command_analytics
+from core.automations import load_rules, next_rule_id, save_rules
+from core.command import command_loader
+from core.db import (
+    add_audit_log,
+    claim_incoming_idempotency,
+    create_incoming_webhook_key,
+    create_webhook,
+    delete_incoming_webhook_key,
+    delete_webhook,
+    ensure_database_ready,
+    get_database_url,
+    get_webhook,
+    list_audit_logs,
+    list_incoming_webhook_keys,
+    list_webhook_deliveries,
+    list_webhooks,
+    resolve_incoming_webhook_key,
+    rotate_incoming_webhook_key,
+    rotate_webhook_secret,
+    touch_incoming_webhook_key,
+    update_incoming_webhook_key,
+    update_webhook,
+)
+from core.digest import apply_digest_schedule, build_digest_message, send_digest_now
+from core.event_bus import event_bus
+from core.handlers.welcome import (
+    get_goodbye_config,
+    get_welcome_config,
+    set_goodbye_config,
+    set_welcome_config,
+)
+from core.rate_limiter import rate_limiter, refresh_rate_limiter_from_runtime
+from core.reports import create_report, get_report, list_reports, update_report_status
+from core.runtime_config import runtime_config
+from core.scheduler import get_scheduler
+from core.session import session_state
+from core.shared import get_bot
+from core.storage import GroupData, Storage
+from core.webhooks import (
+    list_known_events,
+    replay_webhook_delivery,
+    send_test_webhook,
+    webhook_dispatcher_status,
+)
+
+BOT_START_TIME = datetime.now()
+_DOTENV_PATH = Path(__file__).parent.parent / ".env"
+_dotenv_loaded = False
+SESSION_COOKIE_NAME = "zi_session"
+SESSION_TTL_SECONDS = max(3600, int(os.getenv("DASHBOARD_SESSION_TTL_SECONDS", "86400")))
+_session_tokens: dict[str, dict[str, Any]] = {}
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+WS_TOKEN_TTL_SECONDS = max(30, int(os.getenv("DASHBOARD_WS_TOKEN_TTL_SECONDS", "300")))
+_ws_tokens: dict[str, dict[str, Any]] = {}
+INCOMING_MAX_DRIFT_SECONDS = 300
+_incoming_rate_windows: dict[int, list[float]] = {}
+
+
+def _audit(actor: str, action: str, resource: str, details: dict[str, Any] | None = None) -> None:
+    """Best-effort audit trail write."""
+    try:
+        add_audit_log(actor=actor, action=action, resource=resource, details=details or {})
+    except Exception:
+        pass
+
+
+def _verify_incoming_signature(token: str, timestamp: str, signature: str, raw_body: bytes) -> bool:
+    """Verify incoming webhook HMAC signature and timestamp drift."""
+    if not token or not timestamp or not signature:
+        return False
+
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return False
+
+    now = int(time.time())
+    if abs(now - ts) > INCOMING_MAX_DRIFT_SECONDS:
+        return False
+
+    message = f"{timestamp}.".encode() + raw_body
+    digest = hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
+    expected = f"sha256={digest}"
+    return secrets.compare_digest(expected, signature)
+
+
+def _consume_incoming_rate_limit(key_id: int, per_minute: int) -> bool:
+    """Return True if key can proceed under current rate limit."""
+    now = time.time()
+    window = _incoming_rate_windows.get(key_id, [])
+    fresh = [ts for ts in window if now - ts < 60.0]
+    if len(fresh) >= max(1, int(per_minute)):
+        _incoming_rate_windows[key_id] = fresh
+        return False
+
+    fresh.append(now)
+    _incoming_rate_windows[key_id] = fresh
+    return True
+
+
+def _ensure_dotenv_loaded() -> None:
+    """Load .env once for standalone dashboard process usage."""
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return
+    load_dotenv(_DOTENV_PATH)
+    _dotenv_loaded = True
+
+
+def _get_dashboard_credentials() -> tuple[str, str]:
+    """Get dashboard credentials from environment variables."""
+    _ensure_dotenv_loaded()
+    username = str(os.getenv("DASHBOARD_USERNAME", "")).strip()
+    password = str(os.getenv("DASHBOARD_PASSWORD", "")).strip()
+
+    if not username or not password:
+        raise HTTPException(
+            status_code=503,
+            detail="Dashboard credentials are not configured. Set DASHBOARD_USERNAME and DASHBOARD_PASSWORD.",
+        )
+
+    if username == "admin" and password == "admin":
+        raise HTTPException(
+            status_code=503,
+            detail="Insecure dashboard credentials detected. Change DASHBOARD_USERNAME and DASHBOARD_PASSWORD.",
+        )
+
+    return username, password
+
+
+def _normalize_origins(origins: list[str] | tuple[str, ...] | object) -> list[str]:
+    """Normalize, filter, and dedupe origin values while preserving order."""
+    if not isinstance(origins, (list, tuple)):
+        return []
+
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for origin in origins:
+        if not isinstance(origin, str):
+            continue
+        value = origin.strip()
+        if not value or value == "*" or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _resolve_cors_origins(
+    *,
+    env_raw: str,
+    config_origins: list[str] | tuple[str, ...] | object,
+    default_origins: list[str],
+) -> list[str]:
+    """Resolve effective CORS origins with env > config > defaults precedence."""
+    env_origins = _normalize_origins(str(env_raw or "").split(","))
+    cfg_origins = _normalize_origins(config_origins)
+    fallback_origins = _normalize_origins(default_origins)
+    return env_origins or cfg_origins or fallback_origins
+
+
+def _get_cors_origins() -> list[str]:
+    """Resolve allowed dashboard origins from env/config with secure defaults."""
+    _ensure_dotenv_loaded()
+    from_config = runtime_config.get_nested("dashboard", "cors_origins", default=[])
+    return _resolve_cors_origins(
+        env_raw=os.getenv("DASHBOARD_CORS_ORIGINS", ""),
+        config_origins=from_config,
+        default_origins=DEFAULT_CORS_ORIGINS,
+    )
+
+
+def _prune_ws_tokens() -> None:
+    """Remove expired WebSocket auth tokens."""
+    now_ts = datetime.now().timestamp()
+    for token in list(_ws_tokens.keys()):
+        if _ws_tokens[token].get("expires_at", 0.0) <= now_ts:
+            _ws_tokens.pop(token, None)
+
+
+def _issue_ws_token(username: str) -> tuple[str, int]:
+    """Issue one-time WebSocket token for an authenticated user."""
+    _prune_ws_tokens()
+    token = secrets.token_urlsafe(32)
+    expires_in = WS_TOKEN_TTL_SECONDS
+    _ws_tokens[token] = {
+        "username": username,
+        "expires_at": datetime.now().timestamp() + float(expires_in),
+    }
+    return token, expires_in
+
+
+def _consume_ws_token(token: str) -> str | None:
+    """Consume and validate one-time WebSocket token."""
+    _prune_ws_tokens()
+    payload = _ws_tokens.pop(token, None)
+    if not payload:
+        return None
+    expires_at = float(payload.get("expires_at", 0.0))
+    if expires_at <= datetime.now().timestamp():
+        return None
+    return str(payload.get("username", "")) or None
+
+
+def _extract_basic_auth_param(authorization: str | None) -> str:
+    """Extract Basic auth payload from Authorization header."""
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    scheme, param = get_authorization_scheme_param(authorization)
+    if scheme.lower() != "basic":
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication scheme",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    return param
+
+
+def _parse_basic_credentials(param: str) -> tuple[str, str]:
+    """Decode HTTP Basic credentials payload into username/password."""
+    try:
+        decoded = base64.b64decode(param).decode("utf-8")
+        cred_username, _, cred_password = decoded.partition(":")
+        return cred_username, cred_password
+    except Exception as e:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials format",
+            headers={"WWW-Authenticate": "Basic"},
+        ) from e
+
+
+def _verify_dashboard_credentials(
+    cred_username: str, cred_password: str, expected_username: str, expected_password: str
+) -> None:
+    """Verify provided dashboard credentials against configured values."""
+    correct_username = secrets.compare_digest(cred_username, expected_username)
+    correct_password = secrets.compare_digest(cred_password, expected_password)
+    if correct_username and correct_password:
+        return
+
+    raise HTTPException(
+        status_code=401,
+        detail="Incorrect username or password",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+
+
+def _prune_sessions() -> None:
+    """Remove expired session tokens."""
+    now_ts = datetime.now().timestamp()
+    for token in list(_session_tokens.keys()):
+        if _session_tokens[token].get("expires_at", 0.0) <= now_ts:
+            _session_tokens.pop(token, None)
+
+
+def _create_session(username: str) -> str:
+    """Create a new session token for an authenticated user."""
+    _prune_sessions()
+    token = secrets.token_urlsafe(32)
+    _session_tokens[token] = {
+        "username": username,
+        "expires_at": datetime.now().timestamp() + float(SESSION_TTL_SECONDS),
+    }
+    return token
+
+
+def _validate_session(token: str) -> str | None:
+    """Validate a session token and return the username, or None if invalid."""
+    _prune_sessions()
+    payload = _session_tokens.get(token)
+    if not payload:
+        return None
+    if float(payload.get("expires_at", 0.0)) <= datetime.now().timestamp():
+        _session_tokens.pop(token, None)
+        return None
+    return str(payload.get("username", "")) or None
+
+
+def _destroy_session(token: str) -> None:
+    """Destroy a session token."""
+    _session_tokens.pop(token, None)
+
+
+async def get_current_username(request: Request) -> str:
+    """
+    Authenticate via httpOnly session cookie OR HTTP Basic Auth (backward compat).
+    Cookie auth is preferred and checked first.
+    """
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_token:
+        username = _validate_session(session_token)
+        if username:
+            return username
+
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    param = _extract_basic_auth_param(authorization)
+    cred_username, cred_password = _parse_basic_credentials(param)
+    expected_username, expected_password = _get_dashboard_credentials()
+    _verify_dashboard_credentials(
+        cred_username, cred_password, expected_username, expected_password
+    )
+    return cred_username
+
+
+app = FastAPI(
+    title="Zero Ichi Dashboard API",
+    description="API for managing the Zero Ichi WhatsApp bot",
+    version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_get_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_api = APIRouter(dependencies=[Depends(get_current_username)])
+
+storage = Storage()
+
+
+class LoginRequest(BaseModel):
+    """Model for login request."""
+
+    username: str
+    password: str
+
+
+@app.post("/api/login")
+async def login(req: LoginRequest):
+    """Authenticate and set httpOnly session cookie."""
+    try:
+        expected_username, expected_password = _get_dashboard_credentials()
+    except HTTPException as e:
+        raise e
+
+    correct_username = secrets.compare_digest(req.username, expected_username)
+    correct_password = secrets.compare_digest(req.password, expected_password)
+    if not (correct_username and correct_password):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+    session_token = _create_session(req.username)
+    response = JSONResponse(content={"success": True, "username": req.username})
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/logout")
+async def logout(request: Request):
+    """Clear session cookie and destroy server-side session."""
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_token:
+        _destroy_session(session_token)
+    response = JSONResponse(content={"success": True})
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    return response
+
+
+async def check_bot_logged_in(bot) -> bool:
+    """Safely check if the bot is logged in."""
+    if not bot:
+        return False
+    try:
+        return await bot.check_logged_in()
+    except Exception as e:
+        print(f"Error checking bot login state: {e}")
+        return False
+
+
+def get_uptime() -> str:
+    """Get formatted uptime string."""
+    delta = datetime.now() - BOT_START_TIME
+    days = delta.days
+    hours, remainder = divmod(delta.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if days > 0:
+        return f"{days}d {hours}h {minutes}m"
+    elif hours > 0:
+        return f"{hours}h {minutes}m {seconds}s"
+    elif minutes > 0:
+        return f"{minutes}m {seconds}s"
+    else:
+        return f"{seconds}s"
+
+
+class ConfigUpdate(BaseModel):
+    """Model for config updates."""
+
+    section: str
+    key: str
+    value: Any
+
+
+class MessageRequest(BaseModel):
+    """Model for sending a message."""
+
+    to: str
+    text: str
+
+
+class PairRequest(BaseModel):
+    """Model for pairing request."""
+
+    phone: str
+
+
+class CommandToggle(BaseModel):
+    """Model for command toggle."""
+
+    name: str
+    enabled: bool
+
+
+class GroupSettings(BaseModel):
+    """Model for group settings."""
+
+    antilink: bool = False
+    welcome: bool = False
+    mute: bool = False
+
+
+class RateLimitSettings(BaseModel):
+    """Model for rate limit settings."""
+
+    enabled: bool = True
+    user_cooldown: float = 3.0
+    command_cooldown: float = 2.0
+    burst_limit: int = 5
+    burst_window: float = 10.0
+
+
+class WelcomeSettings(BaseModel):
+    """Model for welcome message settings."""
+
+    enabled: bool = True
+    message: str = "Welcome to the group, {name}! 👋"
+
+
+class GoodbyeSettings(BaseModel):
+    """Model for goodbye message settings."""
+
+    enabled: bool = False
+    message: str = "Goodbye, {name}! 👋"
+
+
+class ReportCreate(BaseModel):
+    target_jid: str
+    target_name: str = ""
+    target_number: str = ""
+    target_pn: str = ""
+    target_lid: str = ""
+    reason: str = ""
+    evidence_text: str = ""
+    evidence_message_id: str = ""
+    evidence_sender_jid: str = ""
+    evidence_chat_jid: str = ""
+    evidence_media_type: str = ""
+    evidence_caption: str = ""
+    reporter_jid: str = "dashboard@system"
+    reporter_name: str = "Dashboard"
+    reporter_number: str = ""
+    reporter_pn: str = ""
+    reporter_lid: str = ""
+
+
+class ReportStatusUpdate(BaseModel):
+    status: str
+    resolution: str = ""
+    resolved_by: str = "dashboard@system"
+
+
+class DigestUpdate(BaseModel):
+    enabled: bool = False
+    period: str = "daily"
+    time: str = "20:00"
+    day: str = "sun"
+
+
+class AutomationRuleCreate(BaseModel):
+    name: str = ""
+    trigger_type: str
+    trigger_value: str = ""
+    action_type: str
+    action_value: str = ""
+    enabled: bool = True
+
+
+class AutomationRuleUpdate(BaseModel):
+    name: str | None = None
+    trigger_type: str | None = None
+    trigger_value: str | None = None
+    action_type: str | None = None
+    action_value: str | None = None
+    enabled: bool | None = None
+
+
+class WebhookCreate(BaseModel):
+    name: str
+    url: str
+    events: list[str] = []
+    secret: str = ""
+    enabled: bool = True
+    max_failures: int = 10
+
+
+class WebhookUpdate(BaseModel):
+    name: str | None = None
+    url: str | None = None
+    events: list[str] | None = None
+    secret: str | None = None
+    enabled: bool | None = None
+    max_failures: int | None = None
+
+
+class IncomingWebhookKeyCreate(BaseModel):
+    name: str = "Incoming Key"
+    allowed_actions: list[str] = ["send_message"]
+    rate_limit_per_minute: int = 30
+    enabled: bool = True
+
+
+class IncomingWebhookKeyUpdate(BaseModel):
+    name: str | None = None
+    allowed_actions: list[str] | None = None
+    rate_limit_per_minute: int | None = None
+    enabled: bool | None = None
+
+
+@_api.post("/api/send-message")
+async def send_message(req: MessageRequest):
+    """Send a message via the bot."""
+
+    bot = get_bot()
+    if not await check_bot_logged_in(bot) or bot is None:
+        raise HTTPException(status_code=503, detail="Bot not connected")
+
+    try:
+        await bot.send(req.to, req.text)
+        return {"success": True, "message": "Message sent"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@_api.post("/api/send-media", dependencies=[Depends(get_current_username)])
+async def send_media(
+    to: str = Form(...),
+    type: str = Form(...),
+    caption: str = Form(""),
+    file: UploadFile = File(...),
+):
+    """Send media via the bot."""
+    bot = get_bot()
+    if not await check_bot_logged_in(bot) or bot is None:
+        raise HTTPException(status_code=503, detail="Bot not connected")
+
+    try:
+        content = await file.read()
+        await bot.send_media(
+            to=to, media_type=type, data=content, caption=caption, filename=file.filename or "file"
+        )
+
+        return {"success": True, "message": f"{type.capitalize()} sent"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@_api.get("/api/status")
+async def get_status():
+    """Get bot status."""
+    bot = get_bot()
+    is_connected = False
+    if bot:
+        try:
+            is_connected = await bot.check_connected()
+        except Exception:
+            pass
+
+    return {
+        "status": "online" if is_connected else "offline",
+        "bot_name": runtime_config.bot_name,
+        "prefix": runtime_config.prefix,
+        "uptime": get_uptime(),
+    }
+
+
+@_api.get("/api/auth/status")
+async def get_auth_status():
+    """Get current authentication status."""
+    bot = get_bot()
+
+    bot_actual_logged_in = False
+    if bot:
+        bot_actual_logged_in = await check_bot_logged_in(bot)
+        session_state.is_logged_in = bot_actual_logged_in
+
+    if session_state.qr_code:
+        session_state.is_logged_in = False
+
+    is_logged_in = session_state.is_logged_in
+
+    return {
+        "is_logged_in": is_logged_in,
+        "is_pairing": session_state.is_pairing,
+        "pair_code": session_state.pair_code,
+        "has_qr": session_state.qr_code is not None,
+        "qr_code": session_state.qr_code,
+        "login_method": runtime_config.login_method,
+    }
+
+
+@_api.get("/api/auth/qr")
+async def get_qr():
+    """Get current QR code."""
+    if not session_state.qr_code:
+        return {"qr": None}
+    return {"qr": session_state.qr_code}
+
+
+@_api.post("/api/ws-token")
+async def create_ws_token(username: str = Depends(get_current_username)):
+    """Issue a short-lived token for authenticated WebSocket connections."""
+    token, expires_in = _issue_ws_token(username)
+    return {"token": token, "expires_in": expires_in}
+
+
+@_api.post("/api/auth/pair")
+async def start_pairing(req: PairRequest):
+    """Start pairing with phone number."""
+    bot_cfg = runtime_config.get("bot", {}).copy()
+    bot_cfg["login_method"] = "PAIR_CODE"
+    bot_cfg["phone_number"] = req.phone
+    runtime_config.set("bot", bot_cfg)
+
+    return {
+        "success": True,
+        "message": "Login method updated to Pair Code. Please restart the bot.",
+    }
+
+
+@_api.get("/api/config")
+async def get_config():
+    """Get all configuration."""
+    return {
+        "bot": {
+            "name": runtime_config.bot_name,
+            "prefix": runtime_config.prefix,
+            "login_method": runtime_config.login_method,
+            "owner_jid": runtime_config.get_owner_jid() or "",
+            "auto_read": runtime_config.get_nested("bot", "auto_read", default=False),
+            "auto_react": runtime_config.get_nested("bot", "auto_react", default=False),
+        },
+        "features": {
+            "anti_delete": runtime_config.get_nested("features", "anti_delete", default=True),
+            "anti_link": runtime_config.get_nested("features", "anti_link", default=False),
+            "welcome": runtime_config.get_nested("features", "welcome", default=True),
+            "notes": runtime_config.get_nested("features", "notes", default=True),
+            "filters": runtime_config.get_nested("features", "filters", default=True),
+            "blacklist": runtime_config.get_nested("features", "blacklist", default=True),
+            "warnings": runtime_config.get_nested("features", "warnings", default=True),
+            "automation_rules": runtime_config.get_nested(
+                "features", "automation_rules", default=True
+            ),
+        },
+        "logging": {
+            "log_messages": runtime_config.get_nested("logging", "log_messages", default=True),
+            "verbose": runtime_config.get_nested("logging", "verbose", default=False),
+            "level": runtime_config.get_nested("logging", "level", default="INFO"),
+        },
+        "anti_delete": {
+            "forward_to": runtime_config.get_nested("anti_delete", "forward_to", default=""),
+            "cache_ttl": runtime_config.get_nested("anti_delete", "cache_ttl", default=60),
+        },
+        "warnings": {
+            "limit": runtime_config.get_nested("warnings", "limit", default=3),
+            "action": runtime_config.get_nested("warnings", "action", default="kick"),
+        },
+    }
+
+
+@_api.put("/api/config")
+async def update_config(update: ConfigUpdate):
+    """Update a configuration value."""
+    try:
+        runtime_config.set_nested(update.section, update.key, update.value)
+        await event_bus.emit(
+            "config_update", {"section": update.section, "key": update.key, "value": update.value}
+        )
+        _audit(
+            "dashboard",
+            "config.update",
+            f"{update.section}.{update.key}",
+            {"value": update.value},
+        )
+        return {"success": True, "message": f"Updated {update.section}.{update.key}"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@_api.get("/api/commands")
+async def get_commands():
+    """Get all commands with their status."""
+    disabled = runtime_config.get("disabled_commands", [])
+
+    if not command_loader._commands:
+        command_loader.load_commands()
+
+    commands = []
+    grouped = command_loader.get_grouped_commands()
+    for category, cmd_list in grouped.items():
+        for cmd in cmd_list:
+            commands.append(
+                {
+                    "name": cmd.name,
+                    "description": cmd.description or "",
+                    "category": category,
+                    "enabled": cmd.name not in disabled,
+                }
+            )
+
+    return {"commands": commands}
+
+
+@_api.patch("/api/commands/{name}")
+async def toggle_command(name: str, toggle: CommandToggle):
+    """Enable or disable a command."""
+    disabled = runtime_config.get("disabled_commands", [])
+
+    if toggle.enabled and name in disabled:
+        disabled.remove(name)
+    elif not toggle.enabled and name not in disabled:
+        disabled.append(name)
+
+    runtime_config.set("disabled_commands", disabled)
+    await event_bus.emit("command_update", {"name": name, "enabled": toggle.enabled})
+    _audit(
+        "dashboard",
+        "command.toggle",
+        f"command:{name}",
+        {"enabled": toggle.enabled},
+    )
+
+    return {"success": True, "name": name, "enabled": toggle.enabled}
+
+
+@_api.get("/api/groups")
+async def get_groups():
+    """Get all groups with settings."""
+    bot = get_bot()
+    groups = []
+
+    if await check_bot_logged_in(bot) and bot is not None:
+        try:
+            live_groups = await bot.get_joined_groups()
+            for g in live_groups:
+                group_storage = GroupData(g["id"])
+                groups.append(
+                    {
+                        "id": g["id"],
+                        "name": g["name"],
+                        "memberCount": g["member_count"],
+                        "isAdmin": g["is_admin"],
+                        "settings": {
+                            "antilink": group_storage.anti_link.get("enabled", False),
+                            "welcome": group_storage.load("welcome", {"enabled": True}).get(
+                                "enabled", True
+                            ),
+                            "mute": group_storage.load("mute", {"enabled": False}).get(
+                                "enabled", False
+                            ),
+                        },
+                    }
+                )
+            return {"groups": groups}
+        except Exception:
+            pass
+
+    groups_data = storage.get_all_groups()
+    for group_id, settings in groups_data.items():
+        groups.append(
+            {
+                "id": group_id,
+                "name": settings.get("name", "Unknown"),
+                "memberCount": settings.get("member_count", 0),
+                "isAdmin": settings.get("is_admin", False),
+                "settings": {
+                    "antilink": settings.get("antilink", False),
+                    "welcome": settings.get("welcome", True),
+                    "mute": settings.get("mute", False),
+                },
+            }
+        )
+
+    return {"groups": groups}
+
+
+@_api.post("/api/groups/{group_id}/leave")
+async def leave_group(group_id: str):
+    """Make the bot leave a group."""
+    import time
+
+    if not hasattr(leave_group, "_last_call"):
+        leave_group._last_call = 0.0
+
+    now = time.time()
+    if now - leave_group._last_call < 10:
+        remaining = int(10 - (now - leave_group._last_call))
+        raise HTTPException(status_code=429, detail=f"Rate limited. Try again in {remaining}s")
+
+    bot = get_bot()
+    if not await check_bot_logged_in(bot) or bot is None:
+        raise HTTPException(status_code=503, detail="Bot not connected")
+
+    try:
+        leave_group._last_call = now
+        await bot.leave_group(group_id)
+        await event_bus.emit("group_update", {"action": "leave", "group_id": group_id})
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@_api.post("/api/groups/bulk")
+async def bulk_update_groups(
+    group_ids: list[str] = Body(...),
+    action: str = Body(...),
+    value: bool = Body(...),
+):
+    """Bulk update group settings.
+
+    Args:
+        group_ids: List of group IDs to update.
+        action: Setting to update (antilink, welcome, mute).
+        value: New value for the setting.
+    """
+    valid_actions = ["antilink", "welcome", "mute"]
+    if action not in valid_actions:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid action. Must be one of {valid_actions}"
+        )
+
+    success_count = 0
+    for gid in group_ids:
+        try:
+            group_storage = GroupData(gid)
+            if action == "antilink":
+                current = group_storage.anti_link
+                current["enabled"] = value
+                group_storage.save_anti_link(current)
+            elif action == "welcome":
+                current = group_storage.load("welcome", {"enabled": True, "message": "Welcome!"})
+                current["enabled"] = value
+                group_storage.save("welcome", current)
+            elif action == "mute":
+                current = group_storage.load("mute", {"enabled": False, "message": "Group Muted"})
+                current["enabled"] = value
+                group_storage.save("mute", current)
+            success_count += 1
+        except Exception:
+            continue
+
+    if success_count > 0:
+        await event_bus.emit(
+            "group_update",
+            {"action": "bulk_update", "group_ids": group_ids, "setting": action, "value": value},
+        )
+
+    return {"success": True, "updated": success_count}
+
+
+@_api.get("/api/groups/{group_id}")
+async def get_group(group_id: str):
+    """Get a specific group's settings."""
+    settings = storage.get_group_settings(group_id)
+    if not settings:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return settings
+
+
+@_api.put("/api/groups/{group_id}")
+async def update_group(group_id: str, settings: GroupSettings):
+    """Update a group's settings."""
+    storage.set_group_settings(
+        group_id,
+        {
+            "antilink": settings.antilink,
+            "welcome": settings.welcome,
+            "mute": settings.mute,
+        },
+    )
+    await event_bus.emit(
+        "group_update", {"action": "update", "group_id": group_id, "settings": settings.dict()}
+    )
+    return {"success": True}
+
+
+@_api.get("/api/stats")
+async def get_stats():
+    """Get bot statistics."""
+    bot = get_bot()
+    active_groups = 0
+
+    bot_logged_in = await check_bot_logged_in(bot)
+
+    if bot and bot_logged_in:
+        try:
+            groups = await bot.get_joined_groups()
+            active_groups = len(groups)
+        except Exception:
+            active_groups = len(storage.get_all_groups())
+    else:
+        active_groups = len(storage.get_all_groups())
+
+    scheduled_tasks = 0
+    try:
+        scheduler = get_scheduler()
+        if scheduler:
+            scheduled_tasks = scheduler.get_tasks_count()
+    except Exception:
+        pass
+
+    return {
+        "messagesTotal": storage.get_stat("messages_total", 0),
+        "commandsUsed": storage.get_stat("commands_used", 0),
+        "activeGroups": active_groups,
+        "scheduledTasks": scheduled_tasks,
+        "uptime": get_uptime(),
+    }
+
+
+@_api.get("/api/logs")
+async def get_logs(
+    limit: int = 100,
+    level: str | None = Query(None),
+    source: str = Query("bot"),
+):
+    """Get recent bot logs.
+
+    Args:
+        limit: Max number of log entries to return.
+        level: Filter by log level (info, warning, error, debug, command).
+        source: Log source — 'bot' for structured bot.log, 'messages' for raw WA messages.
+    """
+    logs_dir = Path(__file__).parent.parent / "logs"
+
+    if source == "messages":
+        logs_file = logs_dir / "messages.log"
+    else:
+        logs_file = logs_dir / "bot.log"
+        if not logs_file.exists():
+            logs_file = logs_dir / "messages.log"
+
+    if not logs_file.exists():
+        return {"logs": [], "source": source}
+
+    try:
+
+        def get_last_lines(filename, count):
+            try:
+                with open(filename, "rb") as f:
+                    try:
+                        f.seek(0, os.SEEK_END)
+                        end_pos = f.tell()
+                        buffer = bytearray()
+                        lines_found = 0
+
+                        chunk_size = 8192
+                        pos = end_pos
+
+                        while pos > 0 and lines_found <= count:
+                            read_size = min(chunk_size, pos)
+                            pos -= read_size
+                            f.seek(pos)
+                            chunk = f.read(read_size)
+                            buffer = chunk + buffer
+                            lines_found = buffer.count(b"\n")
+
+                        return [
+                            line.decode("utf-8", errors="replace") for line in buffer.splitlines()
+                        ]
+                    except Exception:
+                        with open(filename, encoding="utf-8") as f_text:
+                            return f_text.readlines()
+            except Exception:
+                return []
+
+        lines = get_last_lines(logs_file, limit + 20)
+
+        parsed_lines = []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+
+            match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] (.*)", line)
+            if match:
+                ts, lvl, msg = match.groups()
+                log_level = lvl.lower()
+
+                if msg.startswith("CMD ["):
+                    log_level = "command"
+
+                if level and level.lower() != log_level:
+                    continue
+
+                parsed_lines.append(
+                    {
+                        "id": f"{ts}-{hash(msg) % 100000}",
+                        "timestamp": ts,
+                        "level": log_level,
+                        "message": msg,
+                    }
+                )
+            else:
+                try:
+                    entry = json.loads(line)
+                    timestamp = entry.get("timestamp", "")
+                    data = entry.get("data", {})
+
+                    if level and level.lower() != "info":
+                        continue
+
+                    parsed_lines.append(
+                        {
+                            "id": data.get("id", timestamp),
+                            "timestamp": timestamp,
+                            "level": "info",
+                            "message": line,
+                        }
+                    )
+                except json.JSONDecodeError:
+                    if level and level.lower() != "info":
+                        continue
+                    parsed_lines.append(
+                        {
+                            "id": str(hash(line) % 10000000),
+                            "timestamp": "",
+                            "level": "info",
+                            "message": line,
+                        }
+                    )
+
+            if len(parsed_lines) >= limit:
+                break
+
+        return {"logs": parsed_lines, "source": source}
+
+    except Exception as e:
+        return {"logs": [], "source": source, "error": str(e)}
+
+
+@_api.get("/api/ratelimit")
+async def get_rate_limit():
+    """Get rate limit configuration."""
+    config = runtime_config.get_nested("rate_limit", default={})
+    if not isinstance(config, dict):
+        config = {}
+    return {
+        "enabled": bool(config.get("enabled", rate_limiter.config.enabled)),
+        "user_cooldown": float(config.get("user_cooldown", rate_limiter.config.user_cooldown)),
+        "command_cooldown": float(
+            config.get("command_cooldown", rate_limiter.config.command_cooldown)
+        ),
+        "burst_limit": int(config.get("burst_limit", rate_limiter.config.burst_limit)),
+        "burst_window": float(config.get("burst_window", rate_limiter.config.burst_window)),
+    }
+
+
+@_api.put("/api/ratelimit")
+async def update_rate_limit(settings: RateLimitSettings):
+    """Update rate limit configuration."""
+    rate_limit_config = {
+        "enabled": settings.enabled,
+        "user_cooldown": settings.user_cooldown,
+        "command_cooldown": settings.command_cooldown,
+        "burst_limit": settings.burst_limit,
+        "burst_window": settings.burst_window,
+    }
+
+    runtime_config.set("rate_limit", rate_limit_config)
+    refresh_rate_limiter_from_runtime()
+    await event_bus.emit("config_update", {"section": "rate_limit", "key": "all"})
+    _audit("dashboard", "rate_limit.update", "rate_limit", rate_limit_config)
+
+    return {"success": True}
+
+
+@_api.get("/api/webhooks")
+async def get_webhooks():
+    """List configured webhooks."""
+    hooks = list_webhooks(include_disabled=True)
+    return {
+        "webhooks": [
+            {
+                "id": hook["id"],
+                "name": hook["name"],
+                "url": hook["url"],
+                "events": hook["events"],
+                "enabled": hook["enabled"],
+                "failure_count": hook.get("failure_count", 0),
+                "max_failures": hook.get("max_failures", 10),
+                "last_success_at": hook.get("last_success_at"),
+                "last_error": hook.get("last_error"),
+                "disabled_reason": hook.get("disabled_reason"),
+                "created_at": hook["created_at"],
+                "updated_at": hook["updated_at"],
+                "has_secret": bool(hook.get("secret")),
+            }
+            for hook in hooks
+        ],
+        "available_events": list_known_events(),
+    }
+
+
+@_api.post("/api/webhooks")
+async def create_webhook_endpoint(payload: WebhookCreate):
+    """Create a webhook endpoint."""
+    url = payload.url.strip()
+    if not url.startswith("http://") and not url.startswith("https://"):
+        raise HTTPException(
+            status_code=400, detail="Webhook URL must start with http:// or https://"
+        )
+
+    secret = payload.secret.strip() or secrets.token_urlsafe(24)
+    created = create_webhook(
+        name=payload.name,
+        url=url,
+        events=payload.events,
+        secret=secret,
+        enabled=payload.enabled,
+        max_failures=payload.max_failures,
+    )
+
+    _audit(
+        "dashboard",
+        "webhook.create",
+        f"webhook:{created['id']}",
+        {
+            "name": created["name"],
+            "url": created["url"],
+            "events": created["events"],
+        },
+    )
+
+    return {
+        "success": True,
+        "webhook": {
+            "id": created["id"],
+            "name": created["name"],
+            "url": created["url"],
+            "events": created["events"],
+            "enabled": created["enabled"],
+            "failure_count": created.get("failure_count", 0),
+            "max_failures": created.get("max_failures", 10),
+            "last_success_at": created.get("last_success_at"),
+            "last_error": created.get("last_error"),
+            "disabled_reason": created.get("disabled_reason"),
+            "created_at": created["created_at"],
+            "updated_at": created["updated_at"],
+            "has_secret": bool(created.get("secret")),
+        },
+        "secret": secret,
+    }
+
+
+@_api.put("/api/webhooks/{webhook_id}")
+async def update_webhook_endpoint(webhook_id: int, payload: WebhookUpdate):
+    """Update webhook endpoint settings."""
+    if payload.url is not None:
+        trimmed = payload.url.strip()
+        if not trimmed.startswith("http://") and not trimmed.startswith("https://"):
+            raise HTTPException(
+                status_code=400,
+                detail="Webhook URL must start with http:// or https://",
+            )
+
+    updated = update_webhook(
+        webhook_id,
+        name=payload.name,
+        url=payload.url,
+        events=payload.events,
+        secret=payload.secret,
+        enabled=payload.enabled,
+        max_failures=payload.max_failures,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    _audit(
+        "dashboard",
+        "webhook.update",
+        f"webhook:{webhook_id}",
+        {
+            "name": updated["name"],
+            "enabled": updated["enabled"],
+            "events": updated["events"],
+            "max_failures": updated.get("max_failures", 10),
+        },
+    )
+
+    return {
+        "success": True,
+        "webhook": {
+            "id": updated["id"],
+            "name": updated["name"],
+            "url": updated["url"],
+            "events": updated["events"],
+            "enabled": updated["enabled"],
+            "failure_count": updated.get("failure_count", 0),
+            "max_failures": updated.get("max_failures", 10),
+            "last_success_at": updated.get("last_success_at"),
+            "last_error": updated.get("last_error"),
+            "disabled_reason": updated.get("disabled_reason"),
+            "created_at": updated["created_at"],
+            "updated_at": updated["updated_at"],
+            "has_secret": bool(updated.get("secret")),
+        },
+    }
+
+
+@_api.delete("/api/webhooks/{webhook_id}")
+async def delete_webhook_endpoint(webhook_id: int):
+    """Delete webhook endpoint."""
+    if not delete_webhook(webhook_id):
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    _audit("dashboard", "webhook.delete", f"webhook:{webhook_id}", {})
+    return {"success": True}
+
+
+@_api.post("/api/webhooks/{webhook_id}/test")
+async def test_webhook_endpoint(webhook_id: int):
+    """Send one test payload to a webhook."""
+    hook = get_webhook(webhook_id)
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    result = await send_test_webhook(webhook_id)
+    _audit(
+        "dashboard",
+        "webhook.test",
+        f"webhook:{webhook_id}",
+        {"success": bool(result.get("success"))},
+    )
+    return {"success": bool(result.get("success")), "result": result}
+
+
+@_api.post("/api/webhooks/{webhook_id}/rotate-secret")
+async def rotate_webhook_secret_endpoint(webhook_id: int):
+    """Rotate one webhook secret and return the new secret once."""
+    hook = get_webhook(webhook_id)
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    secret = rotate_webhook_secret(webhook_id)
+    if not secret:
+        raise HTTPException(status_code=500, detail="Failed to rotate secret")
+
+    _audit("dashboard", "webhook.rotate_secret", f"webhook:{webhook_id}", {})
+    return {"success": True, "secret": secret}
+
+
+@_api.post("/api/webhooks/{webhook_id}/deliveries/{delivery_id}/replay")
+async def replay_webhook_delivery_endpoint(webhook_id: int, delivery_id: int):
+    """Replay one previously logged webhook delivery."""
+    hook = get_webhook(webhook_id)
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    result = await replay_webhook_delivery(webhook_id, delivery_id)
+    _audit(
+        "dashboard",
+        "webhook.replay_delivery",
+        f"webhook:{webhook_id}",
+        {"delivery_id": delivery_id, "success": bool(result.get("success"))},
+    )
+    return {"success": bool(result.get("success")), "result": result}
+
+
+@_api.get("/api/webhooks/{webhook_id}/deliveries")
+async def get_webhook_deliveries_endpoint(webhook_id: int, limit: int = Query(50, ge=1, le=200)):
+    """Get recent webhook delivery attempts."""
+    hook = get_webhook(webhook_id)
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    deliveries = list_webhook_deliveries(webhook_id, limit=limit)
+    return {"deliveries": deliveries, "count": len(deliveries)}
+
+
+@_api.get("/api/incoming-webhook-keys")
+async def list_incoming_webhook_keys_endpoint():
+    """List incoming webhook keys (metadata only)."""
+    keys = list_incoming_webhook_keys()
+    return {"keys": keys, "count": len(keys)}
+
+
+@_api.post("/api/incoming-webhook-keys")
+async def create_incoming_webhook_key_endpoint(payload: IncomingWebhookKeyCreate):
+    """Create incoming webhook key and return token once."""
+    created = create_incoming_webhook_key(
+        name=payload.name,
+        allowed_actions=payload.allowed_actions,
+        rate_limit_per_minute=payload.rate_limit_per_minute,
+        enabled=payload.enabled,
+    )
+    _audit(
+        "dashboard",
+        "incoming_key.create",
+        f"incoming_key:{created['id']}",
+        {
+            "name": created["name"],
+            "allowed_actions": created["allowed_actions"],
+            "rate_limit_per_minute": created["rate_limit_per_minute"],
+        },
+    )
+    return {"success": True, "key": created}
+
+
+@_api.put("/api/incoming-webhook-keys/{key_id}")
+async def update_incoming_webhook_key_endpoint(key_id: int, payload: IncomingWebhookKeyUpdate):
+    """Update incoming webhook key metadata."""
+    updated = update_incoming_webhook_key(
+        key_id,
+        name=payload.name,
+        allowed_actions=payload.allowed_actions,
+        rate_limit_per_minute=payload.rate_limit_per_minute,
+        enabled=payload.enabled,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Incoming webhook key not found")
+
+    _audit(
+        "dashboard",
+        "incoming_key.update",
+        f"incoming_key:{key_id}",
+        {
+            "name": updated["name"],
+            "allowed_actions": updated["allowed_actions"],
+            "enabled": updated["enabled"],
+        },
+    )
+    return {"success": True, "key": updated}
+
+
+@_api.post("/api/incoming-webhook-keys/{key_id}/rotate")
+async def rotate_incoming_webhook_key_endpoint(key_id: int):
+    """Rotate incoming webhook key token and return new value once."""
+    token = rotate_incoming_webhook_key(key_id)
+    if not token:
+        raise HTTPException(status_code=404, detail="Incoming webhook key not found")
+
+    _audit("dashboard", "incoming_key.rotate", f"incoming_key:{key_id}", {})
+    return {"success": True, "token": token}
+
+
+@_api.delete("/api/incoming-webhook-keys/{key_id}")
+async def delete_incoming_webhook_key_endpoint(key_id: int):
+    """Delete incoming webhook key."""
+    if not delete_incoming_webhook_key(key_id):
+        raise HTTPException(status_code=404, detail="Incoming webhook key not found")
+
+    _audit("dashboard", "incoming_key.delete", f"incoming_key:{key_id}", {})
+    return {"success": True}
+
+
+def _parse_incoming_webhook_payload(
+    raw_body: bytes, allowed_actions: list[str] | object
+) -> tuple[str, dict[str, Any]]:
+    """Decode and validate incoming webhook payload shape and action allowlist."""
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+
+    action = str(payload.get("action", "")).strip()
+    data = payload.get("data", {})
+    if not action:
+        raise HTTPException(status_code=400, detail="Missing action")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="data must be an object")
+
+    normalized_allowed = allowed_actions if isinstance(allowed_actions, list) else []
+    if action not in normalized_allowed:
+        raise HTTPException(status_code=403, detail=f"Action '{action}' not allowed")
+
+    return action, data
+
+
+def _validate_incoming_event_type(event_type: str) -> str:
+    """Validate and restrict incoming webhook event names."""
+    if not event_type:
+        raise HTTPException(status_code=400, detail="emit_event requires 'event_type'")
+    if not event_type.startswith("external."):
+        raise HTTPException(status_code=403, detail="Event type not allowed")
+    return event_type
+
+
+async def _execute_incoming_webhook_action(action: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Execute validated incoming webhook action payload."""
+    if action == "send_message":
+        to = str(data.get("to", "")).strip()
+        text_value = str(data.get("text", "")).strip()
+        if not to or not text_value:
+            raise HTTPException(status_code=400, detail="send_message requires 'to' and 'text'")
+
+        bot = get_bot()
+        if bot is None or not await check_bot_logged_in(bot):
+            raise HTTPException(status_code=503, detail="Bot not connected")
+        await bot.send(to, text_value)
+        return {"success": True, "action": action, "sent_to": to}
+
+    if action == "emit_event":
+        event_type = _validate_incoming_event_type(str(data.get("event_type", "")).strip())
+        event_data = data.get("event_data", {})
+        if not isinstance(event_data, dict):
+            raise HTTPException(status_code=400, detail="event_data must be an object")
+        await event_bus.emit(event_type, event_data)
+        return {"success": True, "action": action, "event_type": event_type}
+
+    raise HTTPException(status_code=400, detail=f"Unsupported action '{action}'")
+
+
+@app.post("/api/incoming-webhook/{token}")
+async def incoming_webhook_endpoint(token: str, request: Request):
+    """Receive signed incoming webhook requests and execute allowed actions."""
+    key_meta = resolve_incoming_webhook_key(token)
+    if not key_meta or not key_meta.get("enabled"):
+        raise HTTPException(status_code=401, detail="Invalid incoming webhook key")
+
+    ts_header = request.headers.get("X-ZeroIchi-Incoming-Timestamp", "")
+    sig_header = request.headers.get("X-ZeroIchi-Incoming-Signature", "")
+    idem_header = request.headers.get("X-ZeroIchi-Incoming-Idempotency-Key", "").strip()
+    raw_body = await request.body()
+    if not _verify_incoming_signature(token, ts_header, sig_header, raw_body):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    if not idem_header:
+        raise HTTPException(status_code=400, detail="Missing X-ZeroIchi-Incoming-Idempotency-Key")
+
+    key_id = int(key_meta["id"])
+    if not _consume_incoming_rate_limit(key_id, int(key_meta.get("rate_limit_per_minute", 30))):
+        raise HTTPException(status_code=429, detail="Incoming webhook rate limit exceeded")
+
+    if not claim_incoming_idempotency(key_id, idem_header):
+        raise HTTPException(status_code=409, detail="Duplicate idempotency key")
+
+    action, data = _parse_incoming_webhook_payload(raw_body, key_meta.get("allowed_actions", []))
+    result = await _execute_incoming_webhook_action(action, data)
+
+    touch_incoming_webhook_key(key_id)
+    _audit(
+        f"incoming_key:{key_meta['id']}",
+        "incoming_webhook.execute",
+        action,
+        {"payload_keys": list(data.keys())[:10]},
+    )
+    return result
+
+
+def _mask_database_url(url: str) -> str:
+    """Mask database credentials for operator-facing health output."""
+    value = str(url or "").strip()
+    if not value or "://" not in value or "@" not in value:
+        return value
+
+    scheme, rest = value.split("://", 1)
+    credentials, remainder = rest.split("@", 1)
+    if ":" not in credentials:
+        return value
+    return f"{scheme}://***:***@{remainder}"
+
+
+@app.get("/healthz")
+async def healthz():
+    """Public lightweight liveness endpoint."""
+    return {"status": "ok"}
+
+
+@_api.get("/api/health")
+async def api_health():
+    """Detailed health endpoint for operators."""
+    db_ok = True
+    db_error = ""
+    try:
+        ensure_database_ready()
+    except Exception as exc:
+        db_ok = False
+        db_error = str(exc)
+
+    webhook_status = webhook_dispatcher_status()
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "database": {
+            "ok": db_ok,
+            "url": _mask_database_url(get_database_url()),
+            "error": db_error or None,
+        },
+        "webhooks": webhook_status,
+    }
+
+
+@_api.get("/api/audit-logs")
+async def get_audit_logs(limit: int = Query(100, ge=1, le=500), action: str = Query("")):
+    """List audit log entries."""
+    rows = list_audit_logs(limit=limit, action=action)
+    return {"logs": rows, "count": len(rows)}
+
+
+@_api.get("/api/groups/{group_id}/welcome")
+async def get_welcome(group_id: str):
+    """Get welcome settings for a group."""
+    config = get_welcome_config(group_id)
+    return config
+
+
+@_api.put("/api/groups/{group_id}/welcome")
+async def update_welcome(group_id: str, settings: WelcomeSettings):
+    """Update welcome settings for a group."""
+    set_welcome_config(group_id, enabled=settings.enabled, message=settings.message)
+    return {"success": True}
+
+
+@_api.get("/api/groups/{group_id}/goodbye")
+async def get_goodbye(group_id: str):
+    """Get goodbye settings for a group."""
+    config = get_goodbye_config(group_id)
+    return config
+
+
+@_api.put("/api/groups/{group_id}/goodbye")
+async def update_goodbye(group_id: str, settings: GoodbyeSettings):
+    """Update goodbye settings for a group."""
+    set_goodbye_config(group_id, enabled=settings.enabled, message=settings.message)
+    return {"success": True}
+
+
+@_api.get("/api/tasks")
+async def get_scheduled_tasks():
+    """Get all scheduled tasks."""
+
+    scheduler = get_scheduler()
+    if not scheduler:
+        return {"tasks": [], "count": 0}
+
+    tasks = []
+    for task in scheduler.get_all_tasks():
+        tasks.append(
+            {
+                "id": task.task_id,
+                "type": task.task_type,
+                "chat_jid": task.chat_jid,
+                "message": task.message[:100] + "..." if len(task.message) > 100 else task.message,
+                "trigger_time": task.trigger_time.isoformat() if task.trigger_time else None,
+                "cron_expression": task.cron_expression,
+                "interval_minutes": task.interval_minutes,
+                "enabled": task.enabled,
+                "created_at": task.created_at.isoformat() if task.created_at else None,
+            }
+        )
+
+    return {"tasks": tasks, "count": len(tasks)}
+
+
+@_api.post("/api/tasks")
+async def create_task(task: dict = Body(...)):
+    """Create a new scheduled task."""
+    scheduler = get_scheduler()
+    if not scheduler:
+        raise HTTPException(status_code=503, detail="Scheduler not available")
+
+    task_type = task.get("type")
+    chat_jid = task.get("chat_jid")
+    message = task.get("message")
+
+    if not all([task_type, chat_jid, message]):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    try:
+        if task_type == "reminder":
+            trigger_time = task.get("trigger_time")
+            if not trigger_time:
+                raise HTTPException(status_code=400, detail="Missing trigger_time for reminder")
+
+            new_task = scheduler.add_reminder(
+                chat_jid=chat_jid,
+                message=message,
+                trigger_time=datetime.fromisoformat(trigger_time.replace("Z", "+00:00")),
+                creator_jid="dashboard",
+            )
+
+        elif task_type == "auto_message":
+            interval = task.get("interval_minutes")
+            if not interval:
+                raise HTTPException(
+                    status_code=400, detail="Missing interval_minutes for auto_message"
+                )
+
+            new_task = scheduler.add_auto_message(
+                chat_jid=chat_jid,
+                message=message,
+                interval_minutes=int(interval),
+                creator_jid="dashboard",
+            )
+
+        elif task_type == "recurring":
+            cron = task.get("cron_expression")
+            if not cron:
+                raise HTTPException(
+                    status_code=400, detail="Missing cron_expression for recurring task"
+                )
+
+            new_task = scheduler.add_recurring(
+                chat_jid=chat_jid,
+                message=message,
+                cron_expression=cron,
+                creator_jid="dashboard",
+            )
+
+        else:
+            raise HTTPException(status_code=400, detail="Invalid task type")
+
+        return {"success": True, "task": new_task.to_dict()}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@_api.delete("/api/tasks/{task_id}")
+async def delete_task(task_id: str):
+    """Delete a scheduled task."""
+
+    scheduler = get_scheduler()
+    if not scheduler:
+        raise HTTPException(status_code=503, detail="Scheduler not available")
+
+    if scheduler.remove_task(task_id):
+        return {"success": True, "message": f"Task {task_id} deleted"}
+    else:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+
+@_api.put("/api/tasks/{task_id}/toggle")
+async def toggle_task(task_id: str, enabled: bool = True):
+    """Enable or disable a scheduled task."""
+
+    scheduler = get_scheduler()
+    if not scheduler:
+        raise HTTPException(status_code=503, detail="Scheduler not available")
+
+    if scheduler.toggle_task(task_id, enabled):
+        return {"success": True, "enabled": enabled}
+    else:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+
+class NoteCreate(BaseModel):
+    """Model for creating a note."""
+
+    name: str
+    content: str
+    media_type: str | None = None
+
+
+class NoteUpdate(BaseModel):
+    """Model for updating a note."""
+
+    content: str
+    media_type: str | None = None
+
+
+@_api.get("/api/groups/{group_id}/notes")
+async def get_notes(group_id: str):
+    """Get all notes for a group."""
+    group_storage = GroupData(group_id)
+    notes = group_storage.notes
+
+    notes_list = []
+    for name, data in notes.items():
+        if isinstance(data, dict):
+            notes_list.append(
+                {
+                    "name": name,
+                    "content": data.get("content", ""),
+                    "media_type": data.get("type", "text"),
+                    "media_path": data.get("media_path"),
+                }
+            )
+        else:
+            notes_list.append(
+                {
+                    "name": name,
+                    "content": str(data),
+                    "media_type": "text",
+                    "media_path": None,
+                }
+            )
+
+    return {"notes": notes_list, "count": len(notes_list)}
+
+
+@_api.post("/api/groups/{group_id}/notes")
+async def create_note(group_id: str, note: NoteCreate):
+    """Create a new note for a group."""
+    group_storage = GroupData(group_id)
+    notes = group_storage.notes
+
+    if note.name in notes:
+        raise HTTPException(status_code=400, detail=f"Note '{note.name}' already exists")
+
+    notes[note.name] = {
+        "type": note.media_type or "text",
+        "content": note.content,
+        "media_path": None,
+    }
+    group_storage.save_notes(notes)
+
+    return {"success": True, "message": f"Note '{note.name}' created"}
+
+
+@_api.put("/api/groups/{group_id}/notes/{note_name}")
+async def update_note(group_id: str, note_name: str, note: NoteUpdate):
+    """Update an existing note."""
+    group_storage = GroupData(group_id)
+    notes = group_storage.notes
+
+    if note_name not in notes:
+        raise HTTPException(status_code=404, detail=f"Note '{note_name}' not found")
+
+    existing = notes[note_name] if isinstance(notes[note_name], dict) else {}
+    notes[note_name] = {
+        "type": note.media_type or existing.get("type", "text"),
+        "content": note.content,
+        "media_path": existing.get("media_path"),
+    }
+    group_storage.save_notes(notes)
+
+    return {"success": True, "message": f"Note '{note_name}' updated"}
+
+
+@_api.delete("/api/groups/{group_id}/notes/{note_name}")
+async def delete_note(group_id: str, note_name: str):
+    """Delete a note."""
+    group_storage = GroupData(group_id)
+    notes = group_storage.notes
+
+    if note_name not in notes:
+        raise HTTPException(status_code=404, detail=f"Note '{note_name}' not found")
+
+    del notes[note_name]
+    group_storage.save_notes(notes)
+
+    return {"success": True, "message": f"Note '{note_name}' deleted"}
+
+
+@_api.post("/api/groups/{group_id}/notes/{note_name}/media")
+async def upload_note_media(
+    group_id: str,
+    note_name: str,
+    file: UploadFile = File(...),
+):
+    """Upload media for a note."""
+    from pathlib import Path
+
+    group_storage = GroupData(group_id)
+    notes = group_storage.notes
+
+    if note_name not in notes:
+        raise HTTPException(status_code=404, detail=f"Note '{note_name}' not found")
+
+    ext = Path(file.filename or "file").suffix.lower()
+    media_type_map = {
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".png": "image",
+        ".gif": "image",
+        ".webp": "sticker",
+        ".mp4": "video",
+        ".mkv": "video",
+        ".avi": "video",
+        ".mp3": "audio",
+        ".ogg": "audio",
+        ".wav": "audio",
+        ".pdf": "document",
+        ".doc": "document",
+        ".docx": "document",
+    }
+    media_type = media_type_map.get(ext, "document")
+
+    media_dir = Path(f"data/{group_id}/media")
+    media_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = media_dir / f"{note_name}{ext}"
+    content = await file.read()
+    file_path.write_bytes(content)
+
+    note_data = (
+        notes[note_name]
+        if isinstance(notes[note_name], dict)
+        else {"content": str(notes[note_name])}
+    )
+    note_data["type"] = media_type
+    note_data["media_path"] = str(file_path.resolve())
+    notes[note_name] = note_data
+    group_storage.save_notes(notes)
+
+    return {
+        "success": True,
+        "media_type": media_type,
+        "media_path": str(file_path.resolve()),
+    }
+
+
+@_api.get("/api/groups/{group_id}/notes/{note_name}/media")
+async def get_note_media(group_id: str, note_name: str):
+    """Serve note media file."""
+    from pathlib import Path
+
+    group_storage = GroupData(group_id)
+    notes = group_storage.notes
+
+    if note_name not in notes:
+        raise HTTPException(status_code=404, detail=f"Note '{note_name}' not found")
+
+    note_data = notes[note_name]
+    if not isinstance(note_data, dict) or not note_data.get("media_path"):
+        raise HTTPException(status_code=404, detail="No media for this note")
+
+    media_path = Path(note_data["media_path"])
+    if not media_path.exists():
+        raise HTTPException(status_code=404, detail="Media file not found")
+
+    from fastapi.responses import FileResponse
+
+    return FileResponse(str(media_path))
+
+
+class FilterCreate(BaseModel):
+    """Model for creating a filter."""
+
+    trigger: str
+    response: str
+
+
+@_api.get("/api/groups/{group_id}/filters")
+async def get_filters(group_id: str):
+    """Get all filters for a group."""
+    group_storage = GroupData(group_id)
+    filters = group_storage.filters
+
+    filters_list = []
+    for trigger, response in filters.items():
+        filters_list.append(
+            {
+                "trigger": trigger,
+                "response": response if isinstance(response, str) else str(response),
+            }
+        )
+
+    return {"filters": filters_list, "count": len(filters_list)}
+
+
+@_api.post("/api/groups/{group_id}/filters")
+async def create_filter(group_id: str, filter_data: FilterCreate):
+    """Create a new filter for a group."""
+    group_storage = GroupData(group_id)
+    filters = group_storage.filters
+
+    if filter_data.trigger in filters:
+        raise HTTPException(
+            status_code=400, detail=f"Filter '{filter_data.trigger}' already exists"
+        )
+
+    filters[filter_data.trigger] = filter_data.response
+    group_storage.save_filters(filters)
+
+    return {"success": True, "message": f"Filter '{filter_data.trigger}' created"}
+
+
+@_api.delete("/api/groups/{group_id}/filters/{trigger}")
+async def delete_filter(group_id: str, trigger: str):
+    """Delete a filter."""
+    trigger = unquote(trigger)
+    group_storage = GroupData(group_id)
+    filters = group_storage.filters
+
+    if trigger not in filters:
+        raise HTTPException(status_code=404, detail=f"Filter '{trigger}' not found")
+
+    del filters[trigger]
+    group_storage.save_filters(filters)
+
+    return {"success": True, "message": f"Filter '{trigger}' deleted"}
+
+
+class BlacklistWord(BaseModel):
+    """Model for adding a blacklist word."""
+
+    word: str
+
+
+@_api.get("/api/groups/{group_id}/blacklist")
+async def get_blacklist(group_id: str):
+    """Get blacklisted words for a group."""
+    group_storage = GroupData(group_id)
+    words = group_storage.blacklist
+
+    return {"words": words, "count": len(words)}
+
+
+@_api.post("/api/groups/{group_id}/blacklist")
+async def add_blacklist_word(group_id: str, data: BlacklistWord):
+    """Add a word to the blacklist."""
+    group_storage = GroupData(group_id)
+    words = group_storage.blacklist
+
+    word = data.word.lower().strip()
+    if word in words:
+        raise HTTPException(status_code=400, detail=f"Word '{word}' already in blacklist")
+
+    words.append(word)
+    group_storage.save_blacklist(words)
+
+    return {"success": True, "message": f"Word '{word}' added to blacklist"}
+
+
+@_api.delete("/api/groups/{group_id}/blacklist/{word}")
+async def remove_blacklist_word(group_id: str, word: str):
+    """Remove a word from the blacklist."""
+    word = unquote(word).lower().strip()
+    group_storage = GroupData(group_id)
+    words = group_storage.blacklist
+
+    if word not in words:
+        raise HTTPException(status_code=404, detail=f"Word '{word}' not in blacklist")
+
+    words.remove(word)
+    group_storage.save_blacklist(words)
+
+    return {"success": True, "message": f"Word '{word}' removed from blacklist"}
+
+
+@_api.get("/api/groups/{group_id}/reports")
+async def get_group_reports(group_id: str, status: str = Query("")):
+    """Get moderation reports for a group."""
+    reports = list_reports(group_id, status=status)
+    return {"reports": reports, "count": len(reports), "status": status}
+
+
+@_api.get("/api/groups/{group_id}/reports/{report_id}")
+async def get_group_report(group_id: str, report_id: str):
+    """Get one moderation report by ID."""
+    report = get_report(group_id, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
+@_api.post("/api/groups/{group_id}/reports")
+async def create_group_report(group_id: str, payload: ReportCreate):
+    """Create a moderation report from dashboard."""
+    report = create_report(
+        group_id,
+        reporter_jid=payload.reporter_jid,
+        reporter_name=payload.reporter_name,
+        reporter_number=payload.reporter_number,
+        reporter_pn=payload.reporter_pn,
+        reporter_lid=payload.reporter_lid,
+        target_jid=payload.target_jid,
+        target_name=payload.target_name,
+        target_number=payload.target_number,
+        target_pn=payload.target_pn,
+        target_lid=payload.target_lid,
+        reason=payload.reason or "No reason provided",
+        evidence_text=payload.evidence_text,
+        evidence_message_id=payload.evidence_message_id,
+        evidence_sender_jid=payload.evidence_sender_jid,
+        evidence_chat_jid=payload.evidence_chat_jid,
+        evidence_media_type=payload.evidence_media_type,
+        evidence_caption=payload.evidence_caption,
+    )
+    await event_bus.emit("report_update", {"action": "created", "group_id": group_id})
+    return {"success": True, "report": report}
+
+
+@_api.put("/api/groups/{group_id}/reports/{report_id}")
+async def update_group_report(group_id: str, report_id: str, payload: ReportStatusUpdate):
+    """Update moderation report status."""
+    status = payload.status.lower().strip()
+    if status not in {"open", "resolved", "dismissed"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    updated = update_report_status(
+        group_id,
+        report_id,
+        status=status,
+        resolved_by=payload.resolved_by,
+        resolution=payload.resolution,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    await event_bus.emit(
+        "report_update",
+        {
+            "action": "updated",
+            "group_id": group_id,
+            "report_id": updated.get("id", report_id),
+            "status": updated.get("status", status),
+        },
+    )
+    return {"success": True, "report": updated}
+
+
+@_api.get("/api/groups/{group_id}/digest")
+async def get_group_digest(group_id: str):
+    """Get digest settings and preview for a group."""
+    cfg = GroupData(group_id).digest
+    preview = build_digest_message(group_id, period=str(cfg.get("period", "daily")))
+    return {"config": cfg, "preview": preview}
+
+
+@_api.put("/api/groups/{group_id}/digest")
+async def update_group_digest(group_id: str, payload: DigestUpdate):
+    """Update digest settings for a group."""
+    data = GroupData(group_id)
+    cfg = data.digest
+    cfg["enabled"] = payload.enabled
+    cfg["period"] = payload.period.lower().strip()
+    cfg["time"] = payload.time
+    cfg["day"] = payload.day.lower().strip()[:3]
+    data.save_digest(cfg)
+    cfg = apply_digest_schedule(group_id, creator_jid="dashboard@system")
+    await event_bus.emit("digest_update", {"group_id": group_id, "config": cfg})
+    return {"success": True, "config": cfg}
+
+
+@_api.post("/api/groups/{group_id}/digest/now")
+async def trigger_group_digest_now(group_id: str):
+    """Send digest now for a group."""
+    cfg = GroupData(group_id).digest
+    period = str(cfg.get("period", "daily"))
+    if not send_digest_now(group_id, period=period):
+        raise HTTPException(status_code=500, detail="Scheduler is unavailable")
+    await event_bus.emit("digest_update", {"group_id": group_id, "action": "sent_now"})
+    return {"success": True}
+
+
+@_api.get("/api/groups/{group_id}/automations")
+async def get_group_automations(group_id: str):
+    """Get automation rules for a group."""
+    rules = load_rules(group_id)
+    return {"rules": rules, "count": len(rules)}
+
+
+@_api.post("/api/groups/{group_id}/automations")
+async def create_group_automation(group_id: str, payload: AutomationRuleCreate):
+    """Create automation rule."""
+    rules = load_rules(group_id)
+    rid = next_rule_id(rules)
+    rule = {
+        "id": rid,
+        "name": payload.name.strip() or f"Rule {rid}",
+        "enabled": payload.enabled,
+        "trigger_type": payload.trigger_type.lower().strip(),
+        "trigger_value": payload.trigger_value,
+        "action_type": payload.action_type.lower().strip(),
+        "action_value": payload.action_value,
+    }
+    rules.append(rule)
+    save_rules(group_id, rules)
+    await event_bus.emit("automation_update", {"group_id": group_id, "action": "created"})
+    return {"success": True, "rule": rule}
+
+
+@_api.put("/api/groups/{group_id}/automations/{rule_id}")
+async def update_group_automation(group_id: str, rule_id: str, payload: AutomationRuleUpdate):
+    """Update one automation rule."""
+    rules = load_rules(group_id)
+    rid = rule_id.upper().strip()
+
+    updated = None
+    for rule in rules:
+        if str(rule.get("id", "")).upper() != rid:
+            continue
+        if payload.name is not None:
+            rule["name"] = payload.name
+        if payload.trigger_type is not None:
+            rule["trigger_type"] = payload.trigger_type.lower().strip()
+        if payload.trigger_value is not None:
+            rule["trigger_value"] = payload.trigger_value
+        if payload.action_type is not None:
+            rule["action_type"] = payload.action_type.lower().strip()
+        if payload.action_value is not None:
+            rule["action_value"] = payload.action_value
+        if payload.enabled is not None:
+            rule["enabled"] = payload.enabled
+        updated = rule
+        break
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Automation rule not found")
+
+    save_rules(group_id, rules)
+    await event_bus.emit("automation_update", {"group_id": group_id, "action": "updated"})
+    return {"success": True, "rule": updated}
+
+
+@_api.delete("/api/groups/{group_id}/automations/{rule_id}")
+async def delete_group_automation(group_id: str, rule_id: str):
+    """Delete one automation rule."""
+    rules = load_rules(group_id)
+    rid = rule_id.upper().strip()
+    new_rules = [r for r in rules if str(r.get("id", "")).upper() != rid]
+    if len(new_rules) == len(rules):
+        raise HTTPException(status_code=404, detail="Automation rule not found")
+
+    save_rules(group_id, new_rules)
+    await event_bus.emit("automation_update", {"group_id": group_id, "action": "deleted"})
+    return {"success": True}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    """WebSocket for real-time dashboard updates."""
+    token = ws.query_params.get("token", "")
+    if not token or not _consume_ws_token(token):
+        await ws.close(code=1008, reason="Unauthorized")
+        return
+
+    await ws.accept()
+    queue = event_bus.subscribe()
+    try:
+        while True:
+            event = await queue.get()
+            await ws.send_json(event)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        event_bus.unsubscribe(queue)
+
+
+@_api.get("/api/analytics/commands")
+async def get_analytics_commands(days: int = Query(7, ge=1, le=90), group_id: str = Query("")):
+    """Get top commands by usage, optionally filtered by group."""
+    return {
+        "top_commands": command_analytics.get_top_commands(days, chat_jid=group_id),
+        "total": command_analytics.get_total_commands(days, chat_jid=group_id),
+        "days": days,
+        "group_id": group_id,
+    }
+
+
+@_api.get("/api/analytics/timeline")
+async def get_analytics_timeline(
+    command: str = Query(""), days: int = Query(7, ge=1, le=90), group_id: str = Query("")
+):
+    """Get daily usage timeline, optionally filtered by group."""
+    return {
+        "timeline": command_analytics.get_usage_timeline(command, days, chat_jid=group_id),
+        "command": command or "all",
+        "days": days,
+        "group_id": group_id,
+    }
+
+
+class AIConfigUpdate(BaseModel):
+    """Model for AI configuration updates."""
+
+    enabled: bool = False
+    provider: str = "openai"
+    model: str = "gpt-5-mini"
+    trigger_mode: str = "mention"
+    owner_only: bool = True
+
+
+@_api.get("/api/ai-config")
+async def get_ai_config():
+    """Get AI configuration."""
+    return {
+        "enabled": runtime_config.get_nested("agentic_ai", "enabled", default=False),
+        "provider": runtime_config.get_nested("agentic_ai", "provider", default="openai"),
+        "model": runtime_config.get_nested("agentic_ai", "model", default="gpt-5-mini"),
+        "trigger_mode": runtime_config.get_nested("agentic_ai", "trigger_mode", default="mention"),
+        "owner_only": runtime_config.get_nested("agentic_ai", "owner_only", default=True),
+        "has_api_key": bool(
+            runtime_config.get_nested("agentic_ai", "api_key", default="")
+            or os.getenv("AI_API_KEY", "")
+        ),
+    }
+
+
+@_api.put("/api/ai-config")
+async def update_ai_config(config: AIConfigUpdate):
+    """Update AI configuration."""
+    ai_cfg = runtime_config.get("agentic_ai", {}).copy()
+    ai_cfg["enabled"] = config.enabled
+    ai_cfg["provider"] = config.provider
+    ai_cfg["model"] = config.model
+    ai_cfg["trigger_mode"] = config.trigger_mode
+    ai_cfg["owner_only"] = config.owner_only
+    runtime_config.set("agentic_ai", ai_cfg)
+    await event_bus.emit(
+        "config_update", {"section": "agentic_ai", "key": "all", "value": config.dict()}
+    )
+    _audit("dashboard", "ai_config.update", "agentic_ai", config.dict())
+    return {"success": True}
+
+
+app.include_router(_api)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
